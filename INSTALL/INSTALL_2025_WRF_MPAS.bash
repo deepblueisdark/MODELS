@@ -86,8 +86,118 @@
 # END OF COMMANDS SECTION
 # ============================
 
-# All actual installation and setup code continues below this block.
-# The rest of the original code is preserved.
+#---------------------------------------------------------------------------
+#
+# PROMPTOK=1 means the script will pause after each installation step
+#
+#----------------------------------------------------------------------------
+PROMPTOK=1
+
+#-----------------------------------------------------------------------------
+#
+#                        OPTIONS
+#
+# Each entry in the OPTIONS array corresponds to a specific step.
+# If set to 1, that step will be executed; if 0, it will be skipped.
+#
+OPTIONS=(
+    0  #### [0]  Update system packages       WRF/MPAS/ICON
+    0  #### [1]  Create directories           WRF/MPAS/ICON 
+    0  #### [2]  Download necessary files     WRF/MPAS/ICON
+    0  #### [3]  MPICH                        WRF/MPAS/ICON 
+    0  #### [4]  ZLIB (serial)                WRF/MPAS/ICON
+    0  #### [5]  libpng                       WRF/MPAS/ICON
+    0  #### [6]  jasper                       WRF/MPAS/ICON
+    0  #### [7]  HDF5 (serial)                WRF/MPAS/ICON
+    0  #### [8]  Parallel NetCDF              WRF/MPAS/ 
+    0  #### [9]  NetCDF-C                     WRF/MPAS/ICON 
+    0  #### [10] NetCDF-Fortran               WRF/MPAS/ICON
+    0  #### [11] PIO                          MPAS
+    0  #### [12] Latest WRF version           WRF
+    0  #### [13] Latest WPS                   WRF/MPAS
+    0  #### [14] MPAS                         MPAS 
+    0  ##### 
+    0  #### [15] GEOG (DADOS TERRENO)         MPAS/WRF 
+    0  ##aec
+    0  ##openjpg
+    0 #EXCC
+    0  ##cDI 
+    0  ##openblas 
+    1 ## XML2
+   )
+#-------------------------------------------------------------------------------
+
+
+#----------------------------------------------------------------------------------------
+#
+#                     CPU RESOURCE MANAGEMENT
+#
+#----------------------------------------------------------------------------------------
+#
+#
+# Set to true if you want to force the use of all available CPU cores
+USE_ALL_CORES=false
+#
+#
+# Detect total number of CPU cores available on the system
+CPU_CORE=$(nproc)
+echo "TOTAL AVAILABLE CPU CORES: $CPU_CORE"
+#
+#
+# Threshold to define a low-core system (adjustable)
+CPU_CORE_LIMIT=8
+
+#
+#
+# Check if the user wants to use all cores
+if [ "$USE_ALL_CORES" = true ]; then
+  CPU_HALF_EVEN=$CPU_CORE
+  echo "USING ALL AVAILABLE CORES AS CONFIGURED"
+else
+  # Calculate half the cores and ensure it's an even number
+  CPU_HALF=$((CPU_CORE / 2))
+  CPU_HALF_EVEN=$((CPU_HALF - (CPU_HALF % 2)))
+
+  # If system has few cores (≤ 12), force only 2 cores to be used
+  if [ $CPU_CORE -le $CPU_CORE_LIMIT ]; then
+    CPU_HALF_EVEN=2
+    echo "LOW-CORE SYSTEM DETECTED – FORCING USAGE OF 2 CORES ONLY"
+  fi
+fi
+#
+#
+# Export the final value to be used in parallel commands (e.g., make -j$CPU_HALF_EVEN)
+#
+export CPU_HALF_EVEN
+echo "CORES TO BE USED BY THE SCRIPT: $CPU_HALF_EVEN"
+
+
+#-----------------------------------------------------------------------------
+#
+#
+#   Test block to check if Python version is greater than or equal to 3
+#
+#
+#-------------------------------------------------------------------------------
+#
+#
+#
+PYTHON_CMD=$(command -v python3 || command -v python)
+
+if [ -z "$PYTHON_CMD" ]; then
+    echo "Nenhuma versão do Python encontrada."
+    exit 1
+fi
+
+PYTHON_VERSION=$("$PYTHON_CMD" -c 'import sys; print(sys.version_info[0])')
+
+if [ "$PYTHON_VERSION" -ge 3 ]; then
+    echo "$PYTHON_CMD é Python 3 ou superior."
+else
+    echo "$PYTHON_CMD é inferior à versão 3."
+    exit 1
+fi
+
 
 # -----------------------------------------------------------------------
 #
@@ -106,7 +216,7 @@ COMPILER=${COMPILER:-GNU}
 HOME_DIR=$HOME
 INSTALLATION_PATH="$HOME_DIR/MODELS"
 export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
-
+GEOG="$HOME_DIR/MODELS/GEOG/"
 
 #------------------------------------------------------------------------------
 #
@@ -118,101 +228,83 @@ export DOWNLOADS="$HOME/Downloads"
 
 
 
-#-----------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------------------------
+# PARALLEL_VERSION
+# 0: Build in serial mode — libraries are compiled with the base compilers (CC/CXX/FC).
+# 1: Build in MPI mode — all libraries are compiled using MPI wrapper compilers, i.e.:
+#    CC  -> MPICC   (mpicc or mpiicc)
+#    CXX -> MPICXX  (mpicxx or mpiicpc)
+#    FC  -> MPIFC   (mpifort or mpiifort)
+#    The exact wrappers are selected by mpi_setup():
+#      - MPICH when INTEL_MPI=0 (any COMPILER)
+#      - Intel MPI when COMPILER=INTEL and INTEL_MPI=1
+#    Make sure the chosen MPI is on PATH (and its libs on LD_LIBRARY_PATH) before building.
+#    Note: Only the compilation of libraries/programs switches to wrappers; system tools
+#    (tar, ls, etc.) should run in a clean environment when oneAPI is loaded.
 #
+# Directory layout also reflects this choice (see INSTALL_DIR/LIBS_DIR/MPI_DIR rules).
+#------------------------------------------------------------------------------------------
+#   - GNU/NVIDIA:
+#       PARALLEL_VERSION=0  -> INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
+#       PARALLEL_VERSION=1  -> INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPICH"
+#   - INTEL:
+#       INTEL_MPI=0, PARALLEL_VERSION=0 -> "$INSTALLATION_PATH/INTEL/"
+#       INTEL_MPI=0, PARALLEL_VERSION=1 -> "$INSTALLATION_PATH/INTEL/MPICH"
+#       INTEL_MPI=1, PARALLEL_VERSION=0 -> "$INSTALLATION_PATH/INTEL/MPI_INTEL"
+#       INTEL_MPI=1, PARALLEL_VERSION=1 -> "$INSTALLATION_PATH/INTEL/MPI_MPICH_INTEL"
+#---------------------------------------------------------------------------------------------
+PARALLEL_VERSION=${PARALLEL_VERSION:-0}
+
+# -----------------------------------------------------------------------------
+# INTEL MPI MODE (COMPILER=INTEL, PARALLEL_VERSION=1, INTEL_MPI=1)
+# -----------------------------------------------------------------------------
+# Summary
+#   When building in parallel with Intel MPI, ALL third-party libraries and models
+#   are compiled with Intel MPI wrapper compilers:
+#       CC  -> mpiicc      (C with Intel MPI)
+#       CXX -> mpiicpc     (C++ with Intel MPI)
+#       FC  -> mpiifort    (Fortran with Intel MPI; uses ifx when available)
+#   The script’s mpi_setup() exports MPICC/MPICXX/MPIFC accordingly.
 #
+# Environment prerequisites
+#   - Load oneAPI environment before running this script:
+#         source /opt/intel/oneapi/setvars.sh
+#     This sets I_MPI_ROOT and adds Intel MPI tools to PATH.
+#   - Ensure PATH and LD_LIBRARY_PATH include Intel MPI dirs:
+#         PATH="$I_MPI_ROOT/bin:$PATH"
+#         LD_LIBRARY_PATH="$I_MPI_ROOT/lib:$LD_LIBRARY_PATH"
 #
-#    se  MPI não for definido ou vazio padrão "$INSTALLATION_PATH/$COMPILER/ 
-#    se MPI=MPICH  tudo sera instalado em "$INSTALLATION_PATH/$COMPILER/MPICH"
-#    se MPI=INTEL_MPI  tyudo sera instaaldo em "$INSTALLATION_PATH/$COMPILER/INTEL_MPI/"
-#    se MPI= qualquer coisa ,  tudo sera instalado em "$INSTALLATION_PATH/$COMPILER/qualquer coisa"
+# Directory layout (derived automatically by the script)
+#   INSTALL_DIR="$INSTALLATION_PATH/INTEL/MPI_MPICH_INTEL"
+#   LIBS_DIR="$INSTALL_DIR/"
+#   MPI_DIR="$LIBS_DIR/"
+#   (Name reflects “parallel + Intel MPI” per project convention.)
 #
-#export MPI=
-
-
-
-
-if [ "$MPI" == "MPICH" ]; then
-    export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPICH"
-    export LIBS_DIR=$INSTALL_DIR/
-    export MPI_DIR=$LIBS_DIR/
-
-elif [ "$MPI" == "INTEL_MPI" ]; then
-    export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/INTEL_MPI/"
-    export LIBS_DIR=$INSTALL_DIR
-    #export MPI_DIR=$INSTALL_DIR     
-
-elif [ -n "$MPI" ]; then
-    export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/$MPI/"
-    export LIBS_DIR=$INSTALL_DIR/  # qualquer valor customizado definido em MPI
-	export MPI_DIR=$LIBS_DIR
-else
-	export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
-    export LIBS_DIR=$INSTALL_DIR    #padrão 
-	export MPI_DIR=$LIBS_DIR
-fi
-
-
-#-----------------------------------------------------------------------------
+# Build switches
+#   - Set PARALLEL_VERSION=1 and INTEL_MPI=1.
+#   - Skip MPICH build step (OPTIONS[3]=0) — Intel MPI replaces it.
 #
+# Autotools/CMake tips
+#   - Autotools packages: just rely on the wrappers; do NOT hardcode -lmpi.
+#       env CC=mpiicc CXX=mpiicpc FC=mpiifort ./configure ...
+#   - CMake packages: you can hint the MPI compilers explicitly if needed:
+#       -DMPI_C_COMPILER=mpiicc -DMPI_CXX_COMPILER=mpiicpc -DMPI_Fortran_COMPILER=mpiifort
+#   - Do NOT mix MPI stacks (e.g., MPICH headers/libs) with Intel MPI in the same build.
 #
-# SE PARALLEL VERISON FOR = 1  TODAS AS BIBLIOTECAS SÃO COMPILAS COM MPI   
-#  OU SEJA , CC=mpicc  E NAÕ CC=gcc (GNU)
-#            CC=mpiicc E NÃO CC=icc  (intel)  
-# 
+# Verification
+#   - which mpiifort ; mpiifort --version
+#   - which mpirun   ; mpirun  --version
+#   - At runtime: mpirun -np <N> ./your_program
 #
-PARALLEL_VERSION=0  
+# Known pitfalls / notes
+#   - Do not override CC/CXX/FC with base compilers when PARALLEL_VERSION=1; wrappers must be used.
+#   - Avoid leaking other MPI implementations into PATH ahead of $I_MPI_ROOT/bin.
+#   - For Fortran logical interop warnings when building HDF5 Fortran with ifx, add:
+#         FCFLAGS="... -fpscomp logicals"
+#   - You generally don’t need to add -lmpi manually; wrappers handle link lines.
+# -----------------------------------------------------------------------------
 
-
-
-#---------------------------------------------------------------------------------------
-#
-# Flag to start a clean installation from scratch
-# Warning: this will delete the entire installation directory!
-#
-# Set INSTALL_FROM_SCRATCH=1 to enable
-#
-# INSTALL_FROM_SCRATCH=0
-# if [ "$INSTALL_FROM_SCRATCH" -eq 1 ]; then
-#     rm -rf "$INSTALL_DIR"
-#     read -p "Are you sure? Press ENTER to continue or CTRL+C to cancel. "
-#     echo "Installation will start from scratch."
-# fi
-
-#---------------------------------------------------------------------------
-#
-# PROMPTOK=1 means the script will pause after each installation step
-#
-#----------------------------------------------------------------------------
-PROMPTOK=1
-
-#-----------------------------------------------------------------------------
-#
-#                        OPTIONS
-#
-# Each entry in the OPTIONS array corresponds to a specific step.
-# If set to 1, that step will be executed; if 0, it will be skipped.
-#
-OPTIONS=(
-    1  #### [0]  Update system packages       WRF/MPAS/ICON
-    1  #### [1]  Create directories           WRF/MPAS/ICON 
-    1  #### [2]  Download necessary files     WRF/MPAS/ICON
-    1  #### [3]  MPICH                        WRF/MPAS/ICON 
-    1  #### [4]  ZLIB (serial)                WRF/MPAS/ICON
-    1  #### [5]  libpng                       WRF/MPAS/ICON
-    1  #### [6]  jasper                       WRF/MPAS/ICON
-    1  #### [7]  HDF5 (serial)                WRF/MPAS/ICON
-    1  #### [8]  Parallel NetCDF              WRF/MPAS/ 
-    1  #### [9]  NetCDF-C                     WRF/MPAS/ICON 
-    1  #### [10] NetCDF-Fortran               WRF/MPAS/ICON
-	1  #### [11] PIO                          MPAS
-    1  #### [12] Latest WRF version           WRF
-    1  #### [13] Latest WPS                   WRF/MPAS
-	0  #### [14] MPAS                         MPAS 
-
-   )
-#-------------------------------------------------------------------------------
-
+INTEL_MPI=${INTEL_MPI:-0}
 
 #-----------------------------------------------------------------------------
 #
@@ -234,6 +326,120 @@ export Pnetcdf_Version="1.12.3"
 export Pio_Version="2_5_9"
 export jpeg_version="2.5.3"
 export ecc_version=2.41.0
+
+
+
+# --------------------------------------------------------------------
+# Layout de diretórios por COMPILER / PARALLEL_VERSION / INTEL_MPI
+# --------------------------------------------------------------------
+: "${PARALLEL_VERSION:=0}"   # 0=serial, 1=parallel (MPI)
+: "${INTEL_MPI:=0}"          # só vale quando COMPILER=INTEL (0=MPICH, 1=Intel MPI)
+
+if [ "$COMPILER" = "INTEL" ]; then
+    if [ "$PARALLEL_VERSION" = "1" ]; then
+        if [ "$INTEL_MPI" = "1" ]; then
+            export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPI_MPICH_INTEL"
+        else
+            export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPICH"
+        fi
+    else
+        if [ "$INTEL_MPI" = "1" ]; then
+            export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPI_INTEL"
+        else
+            export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
+        fi
+    fi
+else
+    # GNU e NVIDIA
+    if [ "$PARALLEL_VERSION" = "1" ]; then
+        export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPICH"
+    else
+        export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
+    fi
+fi
+
+export LIBS_DIR="$INSTALL_DIR/"
+export MPI_DIR="$LIBS_DIR/"
+
+echo ">>> COMPILER=$COMPILER  PARALLEL_VERSION=$PARALLEL_VERSION  INTEL_MPI=$INTEL_MPI"
+echo ">>> INSTALL_DIR=$INSTALL_DIR"
+echo ">>> LIBS_DIR=$LIBS_DIR"
+echo ">>> MPI_DIR=$MPI_DIR"
+
+
+
+# --------------------------------------------------------------------
+# MPI: selecionar wrappers
+# - INTEL + INTEL_MPI=1        -> Intel MPI (mpiifort/mpiicc)
+# - INTEL + INTEL_MPI=0 (padrão)-> MPICH; se existir em $LIBS_DIR/bin, usa esse
+# - GNU/NVIDIA                  -> MPICH ($LIBS_DIR/bin se existir, senão PATH)
+# OBS: Esta função é pensada para compilar MODELOS (dmpar), mesmo que as libs sejam seriais.
+# --------------------------------------------------------------------
+mpi_setup() {
+  export MPI_FLAVOR="none"
+
+  if [ "$COMPILER" = "INTEL" ] && [ "${INTEL_MPI:-0}" = "1" ]; then
+    # ---- Intel MPI ----
+    if [ -z "${I_MPI_ROOT:-}" ] && ! command -v mpiifort >/dev/null 2>&1; then
+      echo "ERROR: Intel MPI não encontrado (rode 'source /opt/intel/oneapi/setvars.sh')."
+      return 1
+    fi
+    export MPIFC="$(command -v mpiifort)"
+    export MPICC="$(command -v mpiicc)"
+    export MPICXX="$(command -v mpiicpc)"
+    export MPIF77="$MPIFC" ; export MPIF90="$MPIFC"
+    export MPI_FLAVOR="intelmpi"
+  else
+    # ---- MPICH (preferir o que você instalou no LIBS_DIR) ----
+    if [ -x "$LIBS_DIR/bin/mpifort" ] && [ -x "$LIBS_DIR/bin/mpicc" ]; then
+      case ":$PATH:" in *":$LIBS_DIR/bin:"*) : ;; *) export PATH="$LIBS_DIR/bin:$PATH";; esac
+      if [ -d "$LIBS_DIR/lib" ]; then
+        case ":$LD_LIBRARY_PATH:" in *":$LIBS_DIR/lib:"*) : ;; *) export LD_LIBRARY_PATH="$LIBS_DIR/lib:$LD_LIBRARY_PATH";; esac
+      fi
+      export MPIFC="$LIBS_DIR/bin/mpifort"
+      export MPICC="$LIBS_DIR/bin/mpicc"
+      export MPICXX="$LIBS_DIR/bin/mpicxx"
+      export MPIF77="$MPIFC" ; export MPIF90="$MPIFC"
+      export MPI_FLAVOR="mpich(from-LIBS_DIR)"
+    else
+      # Fallback: MPICH do sistema/ambiente
+      export MPIFC="$(command -v mpifort || command -v mpif90 || true)"
+      export MPICC="$(command -v mpicc   || true)"
+      export MPICXX="$(command -v mpicxx || true)"
+      export MPIF77="$MPIFC" ; export MPIF90="$MPIFC"
+      export MPI_FLAVOR="mpich(PATH)"
+    fi
+  fi
+
+  # Sanidade:
+  if [ -z "$MPIFC" ] || [ -z "$MPICC" ] || [ -z "$MPICXX" ]; then
+    echo "ERROR: wrappers MPI indisponíveis (MPIFC='$MPIFC' MPICC='$MPICC' MPICXX='$MPICXX')."
+    return 1
+  fi
+
+  echo ">>> MPI_FLAVOR=$MPI_FLAVOR"
+  echo ">>> MPIFC=$MPIFC"
+  echo ">>> MPICC=$MPICC"
+  echo ">>> MPICXX=$MPICXX"
+}
+
+
+
+#============================================
+# UNIVERSAL FUNCTION TO SELECT COMPILERS
+#============================================
+
+define_compilers() {
+  if [ "$PARALLEL_VERSION" = "1" ]; then
+    mpi_setup
+    export COMPILERS="CC=$MPICC FC=$MPIFC CXX=$MPICXX F90=$MPIF90 F77=$MPIF77"
+    echo ">>> Modo paralelo: usando wrappers MPI"
+  else
+    # Serial: usa os compiladores base já definidos (GNU/INTEL/NVIDIA)
+    export COMPILERS="CC=$CC FC=$FC CXX=$CXX F90=$F90 F77=$F77"
+    echo ">>> Modo serial: usando compiladores base ($COMPILER)"
+  fi
+}
 
 #--------------------------------------------------------------------------
 #
@@ -264,69 +470,6 @@ export LDFLAGS="-L$LIBS_DIR/lib"          # Link libraries
 # Runtime library path (ensures dynamic libraries are found at runtime)
 export LD_LIBRARY_PATH=$LIBS_DIR/lib:$MPI_DIR/lib:$LD_LIBRARY_PATH
 
-#=======================================
-# MPI executable paths and wrappers
-#=======================================
-
-# Add MPI binary directory to PATH to ensure wrappers are available in the shell
-export PATH=$MPI_DIR/bin:$PATH
-
-# Standard MPI Fortran compiler wrappers (used by libraries and models like WRF)
-export MPIFC=$MPI_DIR/bin/mpifort
-export MPIF77=$MPI_DIR/bin/mpifort
-export MPIF90=$MPI_DIR/bin/mpifort
-
-# Standard MPI C compiler wrappers
-export MPICC=$MPI_DIR/bin/mpicc
-export MPICXX=$MPI_DIR/bin/mpicxx
-
-
-#------------------------------------------------------------------
-#
-#                     CPU RESOURCE MANAGEMENT
-#
-#-------------------------------------------------------------------
-
-#
-#
-# Set to true if you want to force the use of all available CPU cores
-USE_ALL_CORES=false
-
-#
-#
-# Detect total number of CPU cores available on the system
-CPU_CORE=$(nproc)
-echo "TOTAL AVAILABLE CPU CORES: $CPU_CORE"
-
-#
-#
-# Threshold to define a low-core system (adjustable)
-CPU_CORE_LIMIT=8
-
-#
-#
-# Check if the user wants to use all cores
-if [ "$USE_ALL_CORES" = true ]; then
-  CPU_HALF_EVEN=$CPU_CORE
-  echo "USING ALL AVAILABLE CORES AS CONFIGURED"
-else
-  # Calculate half the cores and ensure it's an even number
-  CPU_HALF=$((CPU_CORE / 2))
-  CPU_HALF_EVEN=$((CPU_HALF - (CPU_HALF % 2)))
-
-  # If system has few cores (≤ 12), force only 2 cores to be used
-  if [ $CPU_CORE -le $CPU_CORE_LIMIT ]; then
-    CPU_HALF_EVEN=2
-    echo "LOW-CORE SYSTEM DETECTED – FORCING USAGE OF 2 CORES ONLY"
-  fi
-fi
-
-#
-#
-# Export the final value to be used in parallel commands (e.g., make -j$CPU_HALF_EVEN)
-#
-export CPU_HALF_EVEN
-echo "CORES TO BE USED BY THE SCRIPT: $CPU_HALF_EVEN"
 
 
 
@@ -344,8 +487,10 @@ if [ "$COMPILER" == "GNU" ]; then
     export CC=gcc
     export CXX=g++
     export FC=gfortran
+    export F90=$FC
+    export F77=$FC
 
-    export CFLAGS="-O3 -fPIC -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types"
+    export CFLAGS="-O3 -fPIC -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-error=incompatible-pointer-types"
     export CXXFLAGS="-O3 -fPIC"
     export FFLAGS="-O3 -fPIC"
     export FCFLAGS="-O3 -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -fPIC -fno-second-underscore -ffree-form   -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types"
@@ -364,7 +509,9 @@ elif [ "$COMPILER" == "INTEL" ]; then
         export FC=ifort
     fi
 
-    export CFLAGS="-O2 -fPIC"
+    export CFLAGS="-O2 -fPIC "
+
+    export CXXFLAGS="-O2 -fPIC"
     export CXXFLAGS="-O2 -fPIC"
     export FFLAGS="-O2 -fPIC"
     export FCFLAGS="-O2 -fPIC -free"
@@ -387,31 +534,7 @@ else
 fi
 
 
-#-----------------------------------------------------------------------------
-#
-#
-#   Test block to check if Python version is greater than or equal to 3
-#
-#
-#-------------------------------------------------------------------------------
-#
-#
-#
-PYTHON_CMD=$(command -v python3 || command -v python)
 
-if [ -z "$PYTHON_CMD" ]; then
-    echo "Nenhuma versão do Python encontrada."
-    exit 1
-fi
-
-PYTHON_VERSION=$("$PYTHON_CMD" -c 'import sys; print(sys.version_info[0])')
-
-if [ "$PYTHON_VERSION" -ge 3 ]; then
-    echo "$PYTHON_CMD é Python 3 ou superior."
-else
-    echo "$PYTHON_CMD é inferior à versão 3."
-    exit 1
-fi
 
 
 
@@ -555,10 +678,13 @@ fi
 #
 if [ "${OPTIONS[1]}" -eq 1 ]; then
     echo ">>> [1] Creating working directories..."
+
     mkdir -p "$INSTALL_DIR"
     mkdir -p "$LIBS_DIR"
+    mkdir -p "$GEOG"
     mkdir -p "$DOWNLOADS"
 	mkdir -p "$MPI_DIR"
+    
     if [ "$PROMPTOK" -eq 1 ]; then read -p "Press ENTER to continue..."; fi
 fi
 
@@ -624,11 +750,14 @@ if [ "${OPTIONS[2]}" -eq 1 ]; then
     #
     # PIO (optional, for coupled models)
     #
-    wget -nc https://github.com/NCAR/ParallelIO/archive/refs/tags/pio$Pio_Version.tar.gz
+    #wget -nc https://github.com/NCAR/ParallelIO/archive/refs/tags/pio$Pio_Version.tar.gz
     #wget -nc https://github.com/NCAR/ParallelIO/archive/refs/tags/pio2_5_9.tar.gz
+    wget -nc https://github.com/NCAR/ParallelIO/archive/refs/tags/pio$Pio_Version.tar.gz
 
-
-	wget -nc https://github.com/uclouvain/openjpeg/archive/refs/tags/v$jpeg_version.tar.gz
+    #
+    # JPEG 
+    #
+   	wget -nc https://github.com/uclouvain/openjpeg/archive/refs/tags/v$jpeg_version.tar.gz
 
 
     echo " Problens of Downlaod ? https://confluence.ecmwf.int/display/ECC/Releases"
@@ -644,39 +773,94 @@ fi
 
 
 
-# Check compiler availability
-if ! command -v gfortran &>/dev/null; then
-    echo "ERROR: gfortran not found. Please install it with: sudo dnf install gcc-gfortran"
-    exit 1
-fi
+# --------------------------------------------------------------------
+# Toolchain sanity + version-specific workarounds (GNU / INTEL / NVIDIA)
+# --------------------------------------------------------------------
+case "$COMPILER" in
+  GNU)
+    # Verifica presença
+    for t in gcc g++ gfortran; do
+      command -v "$t" >/dev/null || { echo "ERROR: $t not found. Instale com o gerenciador da sua distro."; exit 1; }
+    done
+    # Versões
+    GCC_VERSION=$(gcc -dumpfullversion 2>/dev/null)
+    GXX_VERSION=$(g++ -dumpfullversion 2>/dev/null)
+    GFORTRAN_VERSION=$(gfortran -dumpfullversion 2>/dev/null)
+    [[ -n "$GCC_VERSION" && -n "$GXX_VERSION" && -n "$GFORTRAN_VERSION" ]] || { echo "ERROR: Não foi possível detectar versões GNU."; exit 1; }
+    GCC_MAJOR=${GCC_VERSION%%.*}
+    GXX_MAJOR=${GXX_VERSION%%.*}
+    GFORTRAN_MAJOR=${GFORTRAN_VERSION%%.*}
+    # Workarounds só para GNU ≥ 10
+    if [ "$GCC_MAJOR" -ge 10 ] || [ "$GXX_MAJOR" -ge 10 ] || [ "$GFORTRAN_MAJOR" -ge 10 ]; then
+      export fallow_argument="-fallow-argument-mismatch"
+      export boz_argument="-fallow-invalid-boz"
+      echo ">>> GNU toolchain ≥ 10 – habilitando flags de compatibilidade do gfortran."
+    else
+      export fallow_argument=""
+      export boz_argument=""
+      echo ">>> GNU toolchain < 10 – sem flags de compatibilidade."
+    fi
+    ;;
 
-# Detect compiler versions
-export GCC_VERSION=$(gcc -dumpfullversion 2>/dev/null)
-export GFORTRAN_VERSION=$(gfortran -dumpfullversion 2>/dev/null)
-export GXX_VERSION=$(g++ -dumpfullversion 2>/dev/null)
-
-# Validate detection
-if [[ -z "$GCC_VERSION" || -z "$GFORTRAN_VERSION" || -z "$GXX_VERSION" ]]; then
-    echo "ERROR: Could not detect one or more compiler versions."
-    exit 1
-fi
-
-export GCC_MAJOR=$(echo "$GCC_VERSION" | cut -d. -f1)
-export GFORTRAN_MAJOR=$(echo "$GFORTRAN_VERSION" | cut -d. -f1)
-export GXX_MAJOR=$(echo "$GXX_VERSION" | cut -d. -f1)
-
-# Set workaround flags if needed
-if [ "$GCC_MAJOR" -ge 10 ] || [ "$GFORTRAN_MAJOR" -ge 10 ] || [ "$GXX_MAJOR" -ge 10 ]; then
-    export fallow_argument="-fallow-argument-mismatch"
-    export boz_argument="-fallow-invalid-boz"
-    echo ">>> GCC/GFortran version ≥ 10 detected – using workaround flags."
-else
+  INTEL)
+    # oneAPI (icx/ifx) preferido; senão clássico (icc/ifort)
+    if command -v icx >/dev/null 2>&1 && command -v ifx >/dev/null 2>&1; then
+      ICX_VER=$(icx --version 2>&1 | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p' | head -n1)
+      IFX_VER=$(ifx --version 2>&1 | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p' | head -n1)
+      echo ">>> Intel oneAPI detectado: icx $ICX_VER / ifx $IFX_VER"
+    elif command -v icc >/dev/null 2>&1 && command -v ifort >/dev/null 2>&1; then
+      ICC_VER=$(icc -V 2>&1 | sed -n 's/.*Version \([0-9][0-9.]*\).*/\1/p' | head -n1)
+      IFORT_VER=$(ifort -V 2>&1 | sed -n 's/.*Version \([0-9][0-9.]*\).*/\1/p' | head -n1)
+      echo ">>> Intel classic detectado: icc $ICC_VER / ifort $IFORT_VER"
+    else
+      echo "ERROR: Toolchain Intel não encontrado (icx/ifx ou icc/ifort). Já executou 'source /opt/intel/oneapi/setvars.sh'?"
+      exit 1
+    fi
+    # Workarounds do GNU não se aplicam
     export fallow_argument=""
     export boz_argument=""
-    echo ">>> GCC/GFortran version < 10 – no workaround flags needed."
-fi
+    ;;
 
-[ "$PROMPTOK" -eq 1 ] && read -p ">>> Compiler version check complete. Press Enter to continue..."
+  NVIDIA)
+    for t in nvc nvc++ nvfortran; do
+      command -v "$t" >/dev/null || { echo "ERROR: $t not found. Instale o NVIDIA HPC SDK."; exit 1; }
+    done
+    NVF_VER=$(nvfortran --version 2>&1 | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p' | head -n1)
+    echo ">>> NVIDIA HPC SDK detectado: nvfortran $NVF_VER"
+    # Workarounds do GNU não se aplicam
+    export fallow_argument=""
+    export boz_argument=""
+    ;;
+
+  *)
+    echo "ERROR: COMPILER='$COMPILER' não suportado nesta checagem."
+    exit 1
+    ;;
+esac
+
+[ "$PROMPTOK" -eq 1 ] && read -p ">>> Verificação do toolchain ($COMPILER) concluída. Pressione ENTER para continuar..."
+
+
+# --- Utilitários para evitar "vazamento" das libs Intel em binários do sistema ---
+# Executa um comando com PATH mínimo e sem LD_PRELOAD/LD_LIBRARY_PATH
+run_clean() {
+  env -i \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    HOME="$HOME" \
+    TERM="${TERM:-xterm}" \
+    LC_ALL=C \
+    "$@"
+}
+
+# Versões “limpas” para tar e ls
+tar_clean() { run_clean tar "$@"; }
+ls_clean()  { run_clean ls  "$@"; }
+
+# (Diagnóstico rápido, opcional)
+echo "INFO: LD_PRELOAD='${LD_PRELOAD:-<vazio>}'"
+echo "INFO: LD_LIBRARY_PATH começa com: $(echo "${LD_LIBRARY_PATH:-<vazio>}" | cut -d: -f1)"
+
+
 
 
 #-----------------------------------------------------------------------------------
@@ -698,7 +882,7 @@ if [ "${OPTIONS[3]}" -eq 1 ]; then
     rm -rf "mpich-$Mpich_Version/"
 
     # Extract the source tarball
-    tar -xvzf "mpich-$Mpich_Version.tar.gz"
+    tar_clean -xvzf "mpich-$Mpich_Version.tar.gz"
     cd "mpich-$Mpich_Version/" || { echo "ERROR: Cannot enter MPICH source directory"; exit 1; }
 
     # Configure MPICH
@@ -716,7 +900,7 @@ if [ "${OPTIONS[3]}" -eq 1 ]; then
     # List installed binaries
     echo ""
     echo ">>> MPICH installed in: $MPI_BIN/bin"
-    ls -ltr $MPI_DIR/bin
+    ls_clean -ltr $MPI_DIR/bin
 
     # Prompt to continue if enabled
     if [ "$PROMPTOK" -eq 1 ]; then
@@ -725,38 +909,53 @@ if [ "${OPTIONS[3]}" -eq 1 ]; then
 fi
 
 
-#============================================
-# UNIVERSAL FUNCTION TO SELECT COMPILERS
-#============================================
-define_compilers() {
-    if [ "$PARALLEL_VERSION" -eq 1 ] && [ "$LIBS_DIR" != "$MPI_DIR" ]; then
-        export COMPILERS="CC=$MPICC FC=$MPIFC CXX=$MPICXX F90=$MPIF90 F77=$MPIF77"
-    else
-        export COMPILERS="CC=$CC FC=$FC CXX=$CXX F90=$F90 F77=$F77"
-    fi
-}
+# ===============================
+#        ZLIB Installation
 
-
-
-#-----------------------------------------------------------------------------------
 # ===============================
 #        ZLIB Installation
 # ===============================
 if [ "${OPTIONS[4]}" -eq 1 ]; then
     define_compilers
-    cd "$DOWNLOADS"
-    rm -rf "zlib-$Zlib_Version/"
-    tar -xvzf "zlib-$Zlib_Version.tar.gz"
-    cd "zlib-$Zlib_Version/"
+    echo "$COMPILERS"
 
-    eval "$COMPILERS FCFLAGS=\"$FCFLAGS\" CFLAGS=\"$CFLAGS\" ./configure --prefix=\"$LIBS_DIR/\""
+    cd "$DOWNLOADS" || { echo "ERRO: sem acesso a $DOWNLOADS"; exit 1; }
+
+    TARFILE="zlib-$Zlib_Version.tar.gz"
+    SRCDIR="zlib-$Zlib_Version"
+
+    # Sanidade
+    [ -f "$TARFILE" ] || { echo "ERRO: $TARFILE não encontrado em $DOWNLOADS"; exit 1; }
+
+    # Teste de integridade do tarball (ambiente limpo)
+    tar_clean -tzf "$TARFILE" >/dev/null || { echo "ERRO: $TARFILE corrompido"; exit 1; }
+
+    # Recomeça “limpo”
+    rm -rf "$SRCDIR"
+    tar_clean -xzf "$TARFILE" || { echo "ERRO: falha ao extrair $TARFILE"; exit 1; }
+
+    cd "$SRCDIR" || { echo "ERRO: diretório-fonte $SRCDIR não existe após extração"; exit 1; }
+
+    # Compilação (usa seu ambiente atual, inclusive Intel)
+    # Sugestão: force icx quando INTEL:
+    if [ "$COMPILER" = "INTEL" ] && command -v icx >/dev/null 2>&1; then
+        export CC=icx
+    fi
+
+    FFLAGS=$fallow_argument
+    FCFLAGS=$fallow_argument
+
+    eval "$COMPILERS FCFLAGS=\"$FCFLAGS\" CFLAGS=\"$CFLAGS\" ./configure --prefix=\"$LIBS_DIR\""
     make -j "$CPU_HALF_EVEN"
     make -j "$CPU_HALF_EVEN" install
 
     echo -e "\n>> ZLIB installed in $LIBS_DIR/lib"
-    ls -ltr "$LIBS_DIR/lib"
+    ls_clean -ltr "$LIBS_DIR/lib"
     [ "$PROMPTOK" -eq 1 ] && read -p "ZLIB installed. Press enter to continue..."
 fi
+
+
+
 
 # ===============================
 #        LIBPNG Installation
@@ -765,7 +964,7 @@ if [ "${OPTIONS[5]}" -eq 1 ]; then
     define_compilers
     cd "$DOWNLOADS"
     rm -rf "libpng-$Libpng_Version/"
-    tar -xvzf "libpng-$Libpng_Version.tar.gz"
+    tar_clean -xvzf "libpng-$Libpng_Version.tar.gz"
     cd "libpng-$Libpng_Version/"
 
     autoreconf -i -f
@@ -775,73 +974,229 @@ if [ "${OPTIONS[5]}" -eq 1 ]; then
     make -j "$CPU_HALF_EVEN" install
 
     echo -e "\n>> LIBPNG installed in $LIBS_DIR/lib"
-    ls -ltr "$LIBS_DIR/lib"
+    ls_clean -ltr "$LIBS_DIR/lib"
     [ "$PROMPTOK" -eq 1 ] && read -p "LIBPNG installed. Press enter to continue..."
 fi
+
 
 # ===============================
 #        JASPER Installation
 # ===============================
 if [ "${OPTIONS[6]}" -eq 1 ]; then
     define_compilers
-    cd "$DOWNLOADS"
-    rm -rf "jasper-$Jasper_Version/"
-    unzip "jasper-$Jasper_Version.zip"
-    cd "jasper-$Jasper_Version/"
+    cd "$DOWNLOADS" || { echo "ERRO: sem acesso a $DOWNLOADS"; exit 1; }
 
-    autoreconf -i
-    eval "$COMPILERS FCFLAGS=\"$FCFLAGS\" CFLAGS=\"$CFLAGS\" ./configure --prefix=\"$LIBS_DIR/\""
-    automake -a -f
-    make -j "$CPU_HALF_EVEN"
-    make -j "$CPU_HALF_EVEN" install
+    ZIP="jasper-$Jasper_Version.zip"
+    SRCDIR="jasper-$Jasper_Version"
 
-    echo -e "\n>> JASPER installed in $LIBS_DIR/lib"
-    ls -ltr "$LIBS_DIR/lib"
-    [ "$PROMPTOK" -eq 1 ] && read -p "JASPER installed. Press enter to continue..."
+    rm -rf "$SRCDIR"
+    [ -f "$ZIP" ] || { echo "ERRO: $ZIP não encontrado em $DOWNLOADS"; exit 1; }
+
+    # unzip "limpo" se existir run_clean; senão, unzip normal
+    if command -v run_clean >/dev/null 2>&1; then
+        run_clean unzip "$ZIP"
+    else
+        unzip "$ZIP"
+    fi
+    cd "$SRCDIR" || { echo "ERRO: fonte Jasper não encontrado"; exit 1; }
+
+    # --- PATCH: garante protótipo de jas_eprintf para icx/clang ---
+    JAS_GETOPT="src/libjasper/base/jas_getopt.c"
+    [ -f "$JAS_GETOPT" ] || JAS_GETOPT="src/base/jas_getopt.c"  # fallback em alguns tarballs
+    if [ -f "$JAS_GETOPT" ] && ! grep -q 'jasper/jas_debug.h' "$JAS_GETOPT"; then
+        sed -i '1i #include "jasper/jas_debug.h"' "$JAS_GETOPT"
+    fi
+
+    # -------- Flags apenas para ESTE pacote (não poluem o resto) --------
+    if [ "$COMPILER" = "INTEL" ]; then
+        # icx: tolera código legado e suprime warnings desconhecidos
+        JAS_CFLAGS="-O3 -fPIC -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-error=incompatible-pointer-types -Wno-unknown-warning-option"
+    else
+        # GNU
+        JAS_CFLAGS="-O3 -fPIC -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-error=incompatible-pointer-types"
+    fi
+    JAS_CPPFLAGS="-I$PWD/src/libjasper/include"
+    JAS_LDFLAGS=""
+
+    # Regera autotools se disponível, mas sem travar se não houver
+    command -v autoreconf >/dev/null 2>&1 && autoreconf -i -f || true
+
+    # Configure usando SOMENTE as flags locais acima
+    eval "$COMPILERS env \
+         CPPFLAGS='$JAS_CPPFLAGS' \
+         LDFLAGS='$JAS_LDFLAGS' \
+         CFLAGS='$JAS_CFLAGS' \
+         ./configure --prefix='$LIBS_DIR' --disable-shared --enable-static" \
+         || { echo 'ERRO: configure Jasper'; exit 1; }
+
+    make -j "$CPU_HALF_EVEN"              || { echo 'ERRO: make Jasper'; exit 1; }
+    make -j "$CPU_HALF_EVEN" install      || { echo 'ERRO: make install Jasper'; exit 1; }
+
+    echo -e "\n>> JASPER instalado em $LIBS_DIR/lib"
+    if command -v ls_clean >/dev/null 2>&1; then ls_clean -ltr "$LIBS_DIR/lib"; else ls -ltr "$LIBS_DIR/lib"; fi
+    [ "$PROMPTOK" -eq 1 ] && read -p "JASPER instalado. Pressione ENTER para continuar..."
 fi
+
+
 
 # ===============================
 #       HDF5 Installation
+#       (C + Fortran, serial)
 # ===============================
 if [ "${OPTIONS[7]}" -eq 1 ]; then
     define_compilers
-    cd "$DOWNLOADS"
-    rm -rf "hdf5-$HDF5_Version"
-    tar -xvzf "hdf5-$HDF5_Version.tar.gz"
-    cd hdf5-hdf5-$HDF5_Version
+
+    cd "$DOWNLOADS" || { echo "ERRO: sem acesso a $DOWNLOADS"; exit 1; }
+
+    # Escolhe tar/ls "limpos" se você já criou essas funções; senão usa padrão
+    if command -v tar_clean >/dev/null 2>&1; then TARCMD=tar_clean; else TARCMD=tar; fi
+    if command -v ls_clean  >/dev/null 2>&1; then LSCMD=ls_clean;  else LSCMD=ls;  fi
+
+    SRCARC="hdf5-$HDF5_Version.tar.gz"
+    SRCDIR="hdf5-hdf5-$HDF5_Version"
+
+    rm -rf "$SRCDIR"
+    $TARCMD -xzf "$SRCARC" || { echo "ERRO: falha ao extrair $SRCARC"; exit 1; }
+    cd "$SRCDIR" || { echo "ERRO: diretório-fonte $SRCDIR não encontrado"; exit 1; }
+
+    # Evita conflito de módulos antigos gerados por outro compilador
+    rm -f "$LIBS_DIR/include"/H5*.mod "$LIBS_DIR/include"/h5*.mod 2>/dev/null || true
+
+    # FLAGS específicas por compilador
+    if [ "$COMPILER" = "INTEL" ]; then
+        # icx/ifx: flags limpas + lógicos compatíveis com C
+        H5_CFLAGS="-O2 -fPIC -Wno-unknown-warning-option"
+        H5_FCFLAGS="-O2 -fPIC -free -fpscomp logicals"
+    else
+        # GNU: otimização padrão
+        H5_CFLAGS="-O3 -fPIC"
+        H5_FCFLAGS="-O3 -fPIC -ffree-form"
+    fi
 
     autoreconf -i -f
-    eval "$COMPILERS FCFLAGS=\"$FCFLAGS\" CFLAGS=\"$CFLAGS\" ./configure --prefix=\"$LIBS_DIR/\" --with-zlib=\"$LIBS_DIR/\" --enable-hl --enable-fortran --disable-shared"
-    automake -a -f
-    make -j "$CPU_HALF_EVEN"
-    make -j "$CPU_HALF_EVEN" install
 
-    echo -e "\n>> HDF5 installed in $LIBS_DIR/lib"
-    ls -ltr "$LIBS_DIR/lib"
-    [ "$PROMPTOK" -eq 1 ] && read -p "HDF5 installed. Press enter to continue..."
+    # IMPORTANTE: zera CPPFLAGS/LDFLAGS para não “puxar” includes/libs globais aqui
+    # (isso evita o erro #7013 por misturar .mod antigos)
+    eval "$COMPILERS \
+         CPPFLAGS='' LDFLAGS='' \
+         CFLAGS='$H5_CFLAGS' FCFLAGS='$H5_FCFLAGS' \
+         ./configure --prefix='$LIBS_DIR' \
+                     --with-zlib='$LIBS_DIR' \
+                     --enable-hl \
+                     --enable-fortran \
+                     --disable-shared" || { echo "ERRO: configure do HDF5"; exit 1; }
+
+    make -j "$CPU_HALF_EVEN" || { echo "ERRO: make HDF5"; exit 1; }
+    make -j "$CPU_HALF_EVEN" install || { echo "ERRO: make install HDF5"; exit 1; }
+
+    echo -e "\n>> HDF5 instalado em $LIBS_DIR/lib"
+    $LSCMD -ltr "$LIBS_DIR/lib"
+
+    [ "$PROMPTOK" -eq 1 ] && read -p "HDF5 instalado. Pressione ENTER para continuar..."
 fi
 
+# # ===============================
+# #       PNETCDF Installation
+# # ===============================
+# if [ "${OPTIONS[8]}" -eq 1 ]; then
+#     define_compilers
+#     cd "$DOWNLOADS"
+#     rm -rf "pnetcdf-$Pnetcdf_Version"
+#     tar_clean -xvzf "pnetcdf-$Pnetcdf_Version.tar.gz"
+#     cd "pnetcdf-$Pnetcdf_Version"
+
+#     autoreconf -i -f
+#     eval "$COMPILERS FCFLAGS=\"$FCFLAGS\" CFLAGS=\"$CFLAGS\" ./configure --prefix=\"$LIBS_DIR/\""
+
+#    # eval "CC='$MPICC' FC='$MPIFC' CXX='$MPICXX' CFLAGS='$local_CFLAGS' FCFLAGS='$local_FCFLAGS' \
+#    #                      ./configure --prefix='$LIBS_DIR' --disable-shared"; then
+    
+#     automake -a -f
+#     make -j "$CPU_HALF_EVEN"
+#     make -j "$CPU_HALF_EVEN" install
+#     make -j "$CPU_HALF_EVEN" check
+
+#     echo -e "\n>> PNETCDF installed in $LIBS_DIR/lib"
+#     ls_clean -ltr "$LIBS_DIR/lib"
+#     [ "$PROMPTOK" -eq 1 ] && read -p "PNETCDF installed. Press enter to continue..."
+# fi
 # ===============================
 #       PNETCDF Installation
 # ===============================
 if [ "${OPTIONS[8]}" -eq 1 ]; then
-    define_compilers
-    cd "$DOWNLOADS"
-    rm -rf "pnetcdf-$Pnetcdf_Version"
-    tar -xvzf "pnetcdf-$Pnetcdf_Version.tar.gz"
-    cd "pnetcdf-$Pnetcdf_Version"
+    echo ">>> PNETCDF: preparando compilação com wrappers MPI (MPICH do LIBS_DIR/bin, se presente)."
 
-    autoreconf -i -f
-    eval "$COMPILERS FCFLAGS=\"$FCFLAGS\" CFLAGS=\"$CFLAGS\" ./configure --prefix=\"$LIBS_DIR/\""
-    automake -a -f
-    make -j "$CPU_HALF_EVEN"
-    make -j "$CPU_HALF_EVEN" install
-    make -j "$CPU_HALF_EVEN" check
+    if mpi_setup; then
+        echo ">>> PNETCDF: usando wrappers MPI: MPICC=$MPICC  MPIFC=$MPIFC"
+    else
+        echo ">>> PNETCDF: SKIP — wrappers MPI não disponíveis (verifique MPICH em $LIBS_DIR/bin)."
+        [ "$PROMPTOK" -eq 1 ] && read -p "PNETCDF skipped. Press ENTER to continue..."
+        :
+    fi
 
-    echo -e "\n>> PNETCDF installed in $LIBS_DIR/lib"
-    ls -ltr "$LIBS_DIR/lib"
-    [ "$PROMPTOK" -eq 1 ] && read -p "PNETCDF installed. Press enter to continue..."
+    if [ -n "$MPICC" ] && [ -n "$MPIFC" ]; then
+        cd "$DOWNLOADS" || { echo "AVISO: sem acesso a $DOWNLOADS — pulando PnetCDF."; }
+        SRCTGZ="pnetcdf-$Pnetcdf_Version.tar.gz"
+        SRCDIR="pnetcdf-$Pnetcdf_Version"
+
+        rm -rf "$SRCDIR"
+        if command -v tar_clean >/dev/null 2>&1; then
+            tar_clean -xzf "$SRCTGZ" || { echo "AVISO: falha ao extrair $SRCTGZ — pulando."; SRCTGZ=""; }
+        else
+            tar -xzf "$SRCTGZ"       || { echo "AVISO: falha ao extrair $SRCTGZ — pulando."; SRCTGZ=""; }
+        fi
+
+        if [ -n "$SRCTGZ" ] && cd "$SRCDIR" 2>/dev/null; then
+            command -v autoreconf >/dev/null 2>&1 && autoreconf -i -f || true
+
+            # Flags locais (não poluem o ambiente global)
+            local_CFLAGS="${CFLAGS:-"-O2 -fPIC"}"
+            local_FCFLAGS="${FCFLAGS:-"-O2 -fPIC"}"
+            [ -n "$fallow_argument" ] && local_FCFLAGS="$local_FCFLAGS $fallow_argument"
+            [ -n "$boz_argument" ]   && local_FCFLAGS="$local_FCFLAGS $boz_argument"
+
+            # configure sem eval e SEM CXX (pnetcdf não precisa)
+            CC="$MPICC" FC="$MPIFC" CFLAGS="$local_CFLAGS" FCFLAGS="$local_FCFLAGS" \
+            ./configure \
+                --prefix="$LIBS_DIR" \
+                --disable-shared \
+                --enable-static \
+                --disable-dependency-tracking
+
+            if [ $? -eq 0 ]; then
+                # fallback para -j1 se CPU_HALF_EVEN não estiver setada
+                JN="${CPU_HALF_EVEN:-1}"
+                make -j "$JN" || { echo "AVISO: 'make' do PnetCDF falhou — pulando."; JN=1; }
+                make -j "$JN" install || echo "AVISO: 'make install' do PnetCDF falhou."
+
+                # Testes MPI: use mpiexec do seu prefixo, 2 ranks costuma ser suficiente
+                if [ -x "$LIBS_DIR/bin/mpiexec" ]; then
+                    make -j 1 check MPIRUN="$LIBS_DIR/bin/mpiexec -n 2" || echo "AVISO: 'make check' do PnetCDF teve falhas."
+                else
+                    echo "AVISO: mpiexec não encontrado em $LIBS_DIR/bin — pulando 'make check'."
+                fi
+
+                echo -e "\n>> PNETCDF instalado em $LIBS_DIR/lib"
+                if command -v ls_clean >/dev/null 2>&1; then ls_clean -ltr "$LIBS_DIR/lib"; else ls -ltr "$LIBS_DIR/lib"; fi
+
+                # sanity quick check (se houver pnetcdf-config)
+                if [ -x "$LIBS_DIR/bin/pnetcdf-config" ]; then
+                    echo ">> pnetcdf-config --all (resumo):"
+                    "$LIBS_DIR/bin/pnetcdf-config" --all | egrep -i 'version|cc=|fc=|mpi'
+                fi
+            else
+                echo "AVISO: 'configure' do PnetCDF falhou — pulando sem interromper o script."
+            fi
+        else
+            echo "AVISO: fonte $SRCDIR não acessível — pulando PnetCDF."
+        fi
+    fi
+
+    [ "$PROMPTOK" -eq 1 ] && read -p "PNETCDF step finished (built or skipped). Press ENTER to continue..."
 fi
+
+
+
 
 # ===============================
 #       NETCDF-C Installation
@@ -850,7 +1205,7 @@ if [ "${OPTIONS[9]}" -eq 1 ]; then
     define_compilers
     cd "$DOWNLOADS"
     rm -rf "netcdf-c-$Netcdf_C_Version"
-    tar -xzvf "netcdf-c-$Netcdf_C_Version.tar.gz"
+    tar_clean -xzvf "netcdf-c-$Netcdf_C_Version.tar.gz"
     cd "netcdf-c-$Netcdf_C_Version"
 
     autoreconf -i -f
@@ -861,7 +1216,7 @@ if [ "${OPTIONS[9]}" -eq 1 ]; then
     make -j "$CPU_HALF_EVEN" install
 
     echo -e "\n>> NETCDF-C installed in $LIBS_DIR/lib"
-    ls -ltr "$LIBS_DIR/lib"
+    ls_clean -ltr "$LIBS_DIR/lib"
     [ "$PROMPTOK" -eq 1 ] && read -p "NETCDF-C installed. Press enter to continue..."
 fi
 
@@ -872,7 +1227,7 @@ if [ "${OPTIONS[10]}" -eq 1 ]; then
     define_compilers
     cd "$DOWNLOADS"
     rm -rf "netcdf-fortran-$Netcdf_Fortran_Version"
-    tar -xvzf "netcdf-fortran-$Netcdf_Fortran_Version.tar.gz"
+    tar_clean -xvzf "netcdf-fortran-$Netcdf_Fortran_Version.tar.gz"
     cd "netcdf-fortran-$Netcdf_Fortran_Version"
 
     autoreconf -i -f
@@ -883,42 +1238,419 @@ if [ "${OPTIONS[10]}" -eq 1 ]; then
     make -j "$CPU_HALF_EVEN" install
 
     echo -e "\n>> NETCDF-FORTRAN installed in $LIBS_DIR/lib"
-    ls -ltr "$LIBS_DIR/lib"
+    ls_clean -ltr "$LIBS_DIR/lib"
     [ "$PROMPTOK" -eq 1 ] && read -p "NETCDF-FORTRAN installed. Press enter to continue..."
 fi
+
+
 
 # ===============================
 #            PIO
 # ===============================
 if [ "${OPTIONS[11]}" -eq 1 ]; then
-    define_compilers
+    echo ">>> PIO: preparando compilação com wrappers MPI (MPICH do LIBS_DIR/bin, se presente)."
 
+    # Dependências mínimas (no mesmo prefixo $LIBS_DIR)
+    missing=()
+    [ -f "$LIBS_DIR/lib/libnetcdf.a"  ]   || missing+=("NetCDF-C")
+    [ -f "$LIBS_DIR/lib/libnetcdff.a" ]   || missing+=("NetCDF-Fortran")
+    [ -f "$LIBS_DIR/lib/libpnetcdf.a" ] || missing+=("PnetCDF")   # NÃO exigir PnetCDF
+    { [ -f "$LIBS_DIR/lib/libhdf5.a" ] || [ -f "$LIBS_DIR/lib/libhdf5_serial.a" ]; } || missing+=("HDF5")
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo ">>> PIO: SKIP — dependências ausentes: ${missing[*]}"
+        echo "          Construa primeiro as libs acima (podem ser seriais; PnetCDF é opcional)."
+        [ "$PROMPTOK" -eq 1 ] && read -p "PIO skipped (missing deps). Press ENTER to continue..."
+    else
+        # Seleciona wrappers MPI (não depende de PARALLEL_VERSION)
+        if mpi_setup; then
+            echo ">>> PIO: usando wrappers MPI:"
+            echo "    MPICC=$MPICC"
+            echo "    MPICXX=$MPICXX"
+            echo "    MPIFC=$MPIFC"
+        else
+            echo ">>> PIO: SKIP — wrappers MPI não disponíveis (verifique MPICH em $LIBS_DIR/bin)."
+            [ "$PROMPTOK" -eq 1 ] && read -p "PIO skipped (no wrappers). Press ENTER to continue..."
+        fi
+
+        if [ -n "$MPICC" ] && [ -n "$MPICXX" ] && [ -n "$MPIFC" ]; then
+            cd "$DOWNLOADS" || { echo "AVISO: sem acesso a $DOWNLOADS — pulando PIO."; }
+            rm -rf "ParallelIO-pio$Pio_Version"
+            if tar_clean -xzf "pio$Pio_Version.tar.gz"; then
+                cd "ParallelIO-pio$Pio_Version" || { echo "AVISO: fonte PIO não encontrado — pulando."; }
+                rm -rf build && mkdir build && cd build
+# ... (tudo igual até criar o diretório build)
+
+# Ambiente restrito SÓ para o PIO:
+(
+  # garante wrappers MPI apenas aqui dentro
+  export CC="$MPICC"
+  export CXX="$MPICXX"
+  export FC="$MPIFC"
+
+  export CMAKE_PREFIX_PATH="$LIBS_DIR:${CMAKE_PREFIX_PATH:-}"
+
+  cmake \
+    -DCMAKE_C_COMPILER="$MPICC" \
+    -DCMAKE_CXX_COMPILER="$MPICXX" \
+    -DCMAKE_Fortran_COMPILER="$MPIFC" \
+    -DNetCDF_C_PATH="$LIBS_DIR" \
+    -DNetCDF_Fortran_PATH="$LIBS_DIR" \
+    -DHDF5_PATH="$LIBS_DIR" \
+    -DCMAKE_INSTALL_PREFIX="$LIBS_DIR" \
+    -DPIO_USE_MALLOC=ON \
+    -DPIO_ENABLE_TIMING=OFF \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DPIO_ENABLE_PNETCDF=OFF \
+    ..
+
+  if [ $? -eq 0 ]; then
+    make -j "$CPU_HALF_EVEN" && make -j "$CPU_HALF_EVEN" install || echo "AVISO: 'make install' do PIO falhou."
+  else
+    echo "AVISO: 'cmake' do PIO falhou — pulando sem interromper o script."
+  fi
+)  # <-- fim do subshell: CC/CXX/FC NÃO afetam o restante do script
+
+            else
+                echo "AVISO: falha ao extrair pio$Pio_Version.tar.gz — pulando PIO."
+            fi
+        fi
+    fi
+
+    [ "$PROMPTOK" -eq 1 ] && read -p "PIO step finished (built or skipped). Press ENTER to continue..."
+fi
+
+
+
+
+
+# ===============================
+#        AEC Installation
+# ===============================
+if [ "${OPTIONS[17]}" -eq 1 ]; then
+    echo ">>> AEC: preparando compilação estática para uso no ECCODES..."
+    
     cd "$DOWNLOADS"
-    rm -rf ParallelIO-pio$Pio_Version
-    tar -xzvf pio$Pio_Version.tar.gz
-    cd ParallelIO-pio$Pio_Version
-    mkdir -p pio && cd pio
-    export PIOSRC="$DOWNLOADS/ParallelIO-pio$Pio_Version/"
+    rm -rf libaec
+    git clone https://gitlab.dkrz.de/k202009/libaec.git
+    cd libaec/
+    mkdir -p build
+    cd build/
 
-    # Compilação com MPI
-    CC=$MPICC FC=$MPIFC CXX=$MPICXX F90=$MPIF90 F77=$MPIF77 \
-    cmake -DNetCDF_C_PATH=$LIBS_DIR \
-          -DNetCDF_Fortran_PATH=$LIBS_DIR \
-          -DPnetCDF_PATH=$LIBS_DIR \
-          -DHDF5_PATH=$LIBS_DIR \
-          -DCMAKE_INSTALL_PREFIX=$LIBS_DIR \
-          -DPIO_USE_MALLOC=ON \
-          -DCMAKE_VERBOSE_MAKEFILE=1 \
-          -DPIO_ENABLE_TIMING=OFF \
-          $PIOSRC
+    cmake .. \
+        -DCMAKE_INSTALL_PREFIX=$LIBS_DIR \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DBUILD_SHARED_LIBS=OFF
+
+    make -j "$CPU_HALF_EVEN"
+    make install
+
+    echo -e "\n>> AEC instalado estaticamente em $LIBS_DIR/lib"
+    ls -ltr "$LIBS_DIR/lib" | grep aec
+    [ "$PROMPTOK" -eq 1 ] && read -p "AEC build done. Press enter to continue..."
+fi
+
+
+# ===============================
+#        OPENJPEG Installation
+# ===============================
+if [ "${OPTIONS[18]}" -eq 1 ]; then
+    cd "$DOWNLOADS"
+    rm -rf openjpeg-$jpeg_version
+    tar -xzvf v$jpeg_version.tar.gz
+    cd openjpeg-$jpeg_version/
+    mkdir -p build
+    cd build/
+
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=$LIBS_DIR \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DBUILD_SHARED_LIBS=OFF
 
     make -j "$CPU_HALF_EVEN"
     make -j "$CPU_HALF_EVEN" install
 
-    echo -e "\n>> PIO installed in $LIBS_DIR/lib"
+    echo -e "\n>> OPENJPEG (static) installed in $LIBS_DIR/lib"
     ls -ltr "$LIBS_DIR/lib"
-    [ "$PROMPTOK" -eq 1 ] && read -p "PIO installed. Press enter to continue..."
+    [ "$PROMPTOK" -eq 1 ] && read -p "OPENJPEG build done. Press enter to continue..."
 fi
+
+
+
+# ===============================
+#        ECCODES (STATIC)
+# ===============================
+if [ "${OPTIONS[19]}" -eq 1 ]; then
+    echo ">>> ECCODES: compilando versão ESTÁTICA..."
+    
+    cd "$DOWNLOADS"
+    rm -rf eccodes-2.41.0-Source
+    tar -xf eccodes-2.41.0-Source.tar.gz
+    cd eccodes-2.41.0-Source
+    mkdir -p build
+    cd build
+
+    cmake .. \
+  -DCMAKE_INSTALL_PREFIX="$LIBS_DIR" \
+  -DCMAKE_INSTALL_LIBDIR=lib \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DENABLE_NETCDF=OFF \
+  -DENABLE_GRIB_API_COMPAT=ON \
+  -DENABLE_JPG=OFF \
+  -DENABLE_PNG=OFF \
+  -DENABLE_AEC=ON \
+  -DENABLE_FORTRAN=ON \
+  -DCMAKE_PREFIX_PATH="$LIBS_DIR" \
+  -DCMAKE_EXE_LINKER_FLAGS="-Wl,--start-group $LIBS_DIR/lib/libaec.a $LIBS_DIR/lib/libz.a -ldl -Wl,--end-group"
+
+    make -j "$CPU_HALF_EVEN"
+    make install
+
+    echo -e "\n>> ECCODES instalado estaticamente em $LIBS_DIR/lib:"
+    ls -lh "$LIBS_DIR/lib" | grep eccodes
+    [ "$PROMPTOK" -eq 1 ] && read -p "ECCODES estático finalizado. Pressione Enter..."
+fi
+
+# ===============================
+#        CDI (STATIC, externo)
+# ===============================
+if [ "${OPTIONS[20]}" -eq 1 ]; then
+    echo ">>> CDI: baixando e compilando ESTÁTICO (ecCodes, COM Fortran) ..."
+
+    CDI_VER="cdi-2.5.3"             # troque se quiser outro tag
+    CDI_TGZ="libcdi-${CDI_VER}.tar.gz"
+
+    cd "$DOWNLOADS"
+    rm -rf libcdi libcdi-* "$CDI_TGZ"
+
+    # Baixa tarball oficial do GitLab (público)
+    wget -O "$CDI_TGZ" "https://gitlab.dkrz.de/mpim-sw/libcdi/-/archive/${CDI_VER}/libcdi-${CDI_VER}.tar.gz" || {
+        echo "!!! ERRO: não consegui baixar $CDI_TGZ"
+        exit 1
+    }
+
+    tar -xzf "$CDI_TGZ"
+    mv "libcdi-${CDI_VER}" libcdi
+    cd libcdi
+
+    # Se faltar ./configure, gera (alguns tarballs já vêm prontos)
+    if [ ! -x "./configure" ]; then
+        echo ">>> 'configure' ausente; executando autogen.sh/autoreconf ..."
+        if [ -x "./autogen.sh" ]; then
+            ./autogen.sh
+        else
+            autoreconf -fi
+        fi
+    fi
+
+    # Triplet de build (corrige "cannot guess build type")
+    BUILD_TRIPLET="$(./config.guess 2>/dev/null || echo $(uname -m)-pc-linux-gnu)"
+
+export CC=gcc
+export FC=gfortran
+
+# # caminhos do seu prefixo
+# # --- FLAGS/DEPS (preferir pkg-config) ---
+# # --- FLAGS/DEPS (preferir pkg-config) ---
+# export PKG_CONFIG_PATH="$LIBS_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
+# export CC=gcc
+# export FC=gfortran
+
+# if pkg-config --exists eccodes; then
+#     echo ">>> CDI: usando pkg-config para ecCodes (estático)"
+#     # cflags e libs completos, já com as dependências
+#     export CPPFLAGS="$(pkg-config --cflags eccodes)"
+#     export LIBS="$(pkg-config --static --libs eccodes) -lstdc++"
+# else
+#     echo ">>> CDI: ATENÇÃO — eccodes.pc não encontrado; usando fallback manual."
+#     export CPPFLAGS="-I$LIBS_DIR/include"
+#     # Núcleo + dependências mínimas
+#     export LIBS="-Wl,--start-group \
+#       $LIBS_DIR/lib/libeccodes.a \
+#       $LIBS_DIR/lib/libeccodes_f90.a \
+#       $LIBS_DIR/lib/libaec.a \
+#       $LIBS_DIR/lib/libz.a \
+#       -ldl -lpthread -lm -lstdc++ -Wl,--end-group"
+
+#     # Adicione extras se existirem no seu prefixo (caso tenha habilitado no ecCodes)
+#     [ -f "$LIBS_DIR/lib/libopenjp2.a" ] && LIBS="$LIBS -lopenjp2"
+#     [ -f "$LIBS_DIR/lib/libpng.a" ]     && LIBS="$LIBS -lpng"
+#     [ -f "$LIBS_DIR/lib/libnetcdf.a" ]  && LIBS="$LIBS -lnetcdf"
+#     # hdf5 costuma exigir a dupla abaixo; ajuste se seu HDF5 estiver dinâmico
+#     [ -f "$LIBS_DIR/lib/libhdf5_hl.a" ] && LIBS="$LIBS -lhdf5_hl -lhdf5"
+#     # algumas builds trazem libsz (SZIP) separada
+#     [ -f "$LIBS_DIR/lib/libsz.a" ]      && LIBS="$LIBS -lsz"
+# fi
+
+# export FCFLAGS="-I$LIBS_DIR/include -I$LIBS_DIR/include/cdi"
+# export LDFLAGS="-L$LIBS_DIR/lib"
+
+# ./configure \
+#   --build="$BUILD_TRIPLET" \
+#   --prefix="$LIBS_DIR" \
+#   --libdir="$LIBS_DIR/lib" \
+#   --includedir="$LIBS_DIR/include" \
+#   --disable-shared --enable-static \
+#   --with-eccodes="$LIBS_DIR" \
+#   --enable-iso-c-interface
+
+# --- FLAGS/DEPS (preferir pkg-config do seu prefixo) ---
+# --- FLAGS/DEPS (preferir pkg-config do seu prefixo) ---
+export CC=gcc
+export FC=gfortran
+
+# garanta que o seu .pc vem primeiro
+export PKG_CONFIG_PATH="$LIBS_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+export PKG_CONFIG_ALL_STATIC=1
+
+echo ">>> PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+
+USE_PC=0
+if PKGCFG_CFLAGS="$(pkg-config --cflags eccodes 2>/dev/null)" \
+   && PKGCFG_LIBS="$(pkg-config --libs --static eccodes 2>/dev/null)"; then
+    echo ">>> eccodes.pc encontrado"
+    echo "    CFLAGS: $PKGCFG_CFLAGS"
+    echo "    LIBS  : $PKGCFG_LIBS"
+    # só use se apontar para seu prefixo
+    case " $PKGCFG_LIBS " in
+      *" -L$LIBS_DIR/lib "*) USE_PC=1 ;;
+      *) USE_PC=0 ;;
+    esac
+fi
+
+if [ "$USE_PC" -eq 1 ]; then
+    echo ">>> Usando pkg-config do seu prefixo (estático)"
+    export CPPFLAGS="$PKGCFG_CFLAGS"
+    # gcc não puxa libstdc++ sozinho; some -lstdc++
+    export LIBS="$PKGCFG_LIBS -lstdc++"
+else
+    echo ">>> ATENÇÃO: eccodes.pc ausente/incompleto — usando fallback manual."
+    export CPPFLAGS="-I$LIBS_DIR/include"
+    export LIBS="-Wl,--start-group \
+      $LIBS_DIR/lib/libeccodes.a \
+      $LIBS_DIR/lib/libeccodes_f90.a \
+      $LIBS_DIR/lib/libaec.a \
+      $LIBS_DIR/lib/libz.a \
+      -ldl -lpthread -lm -lstdc++ -Wl,--end-group"
+
+    # acrescente extras se você os habilitou no ecCodes
+    [ -f "$LIBS_DIR/lib/libopenjp2.a" ] && LIBS="$LIBS -lopenjp2"
+    [ -f "$LIBS_DIR/lib/libpng.a" ]     && LIBS="$LIBS -lpng"
+    [ -f "$LIBS_DIR/lib/libnetcdf.a" ]  && LIBS="$LIBS -lnetcdf"
+    [ -f "$LIBS_DIR/lib/libhdf5_hl.a" ] && LIBS="$LIBS -lhdf5_hl -lhdf5"
+    [ -f "$LIBS_DIR/lib/libsz.a" ]      && LIBS="$LIBS -lsz"
+fi
+
+export FCFLAGS="-I$LIBS_DIR/include -I$LIBS_DIR/include/cdi"
+export LDFLAGS="-L$LIBS_DIR/lib"
+
+# --- teste rápido de link (diagnóstico pré-configure) ---
+echo 'int main(){return 0;}' > /tmp/t.c
+if ! gcc /tmp/t.c $CPPFLAGS $LDFLAGS $LIBS -o /tmp/t.exe ; then
+    echo ">>> FALHA no link de teste com as libs detectadas."
+    echo ">>> CPPFLAGS: $CPPFLAGS"
+    echo ">>> LDFLAGS : $LDFLAGS"
+    echo ">>> LIBS    : $LIBS"
+    exit 1
+fi
+rm -f /tmp/t.c /tmp/t.exe
+
+./configure \
+  --build="$BUILD_TRIPLET" \
+  --prefix="$LIBS_DIR" \
+  
+  --libdir="$LIBS_DIR/lib" \
+  --includedir="$LIBS_DIR/include" \
+  --disable-shared --enable-static \
+  --with-eccodes="$LIBS_DIR" \
+  --enable-iso-c-interface
+
+
+
+    make -j "$CPU_HALF_EVEN"
+    make install
+
+    echo ">>> Verificando CDI em $LIBS_DIR:"
+    ls -lh "$LIBS_DIR/lib"/libcdi*.a || true
+    ls -lh "$LIBS_DIR/include"/cdi*.mod "$LIBS_DIR/include"/cdi/cdi*.mod 2>/dev/null || true
+
+    [ "$PROMPTOK" -eq 1 ] && read -p "CDI estático (com Fortran) finalizado. Pressione Enter..."
+fi
+
+
+# ===============================
+#        OPENBLAS (STATIC)
+# ===============================
+if [ "${OPTIONS[21]}" -eq 1 ]; then
+    echo ">>> OPENBLAS: compilando versão ESTÁTICA..."
+
+    cd "$DOWNLOADS"
+    # Baixe a versão desejada (ex.: 0.3.27)
+    [ -f OpenBLAS-0.3.27.tar.gz ] || wget https://github.com/xianyi/OpenBLAS/archive/refs/tags/v0.3.27.tar.gz -O OpenBLAS-0.3.27.tar.gz
+
+    rm -rf OpenBLAS-0.3.27
+    tar -xf OpenBLAS-0.3.27.tar.gz
+    cd OpenBLAS-0.3.27
+
+    # Build 100% estático, sem OpenMP para evitar precisar de -fopenmp/-lgomp
+    make -j "$CPU_HALF_EVEN" NO_SHARED=1 USE_OPENMP=0
+    #make PREFIX="$LIBS_DIR" install
+    make NO_SHARED=1 USE_OPENMP=0 PREFIX="$LIBS_DIR" install
+
+    echo ">>> Criando symlinks compatíveis (blas/lapack) -> openblas"
+    cd "$LIBS_DIR/lib"
+    ln -sf libopenblas.a libblas.a
+    ln -sf libopenblas.a liblapack.a
+
+    echo ">>> OK: instalados:"
+    ls -lh "$LIBS_DIR/lib"/lib{openblas,blas,lapack}.a
+    [ "$PROMPTOK" -eq 1 ] && read -p "OpenBLAS estático finalizado. Pressione Enter..."
+fi
+
+# ===============================
+#        LIBXML2 (STATIC)
+# ===============================
+if [ "${OPTIONS[22]}" -eq 1 ]; then
+    echo ">>> LIBXML2: compilando versão ESTÁTICA..."
+
+    cd "$DOWNLOADS"
+    LIBXML2_VERSION="2.11.7"
+    LIBXML2_TAR="libxml2-${LIBXML2_VERSION}.tar.xz"
+    LIBXML2_DIR="libxml2-${LIBXML2_VERSION}"
+
+    # Baixar do repositório GNOME (novo caminho)
+    [ -f "$LIBXML2_TAR" ] || \
+        wget https://download.gnome.org/sources/libxml2/2.11/$LIBXML2_TAR
+
+    # Extrair e entrar no diretório
+    rm -rf "$LIBXML2_DIR"
+    tar -xf "$LIBXML2_TAR"
+    cd "$LIBXML2_DIR"
+
+    # Configuração para build estático, sem Python
+    ./configure \
+        --prefix="$LIBS_DIR" \
+        --disable-shared \
+        --enable-static \
+        --without-python \
+        --without-lzma \
+        --without-zlib
+
+    # Compilar e instalar
+    make -j "$CPU_HALF_EVEN"
+    make install
+
+    echo ">>> Verificando arquivos instalados:"
+    ls -lh "$LIBS_DIR/lib/libxml2.a"
+    ls -lh "$LIBS_DIR/include/libxml2"
+
+    [ "$PROMPTOK" -eq 1 ] && read -p "libxml2 estático finalizado. Pressione Enter..."
+fi
+
+
+
+
 
 
 
@@ -929,14 +1661,68 @@ fi
 #                    WRF
 #
 #
+# Detecta libm da glibc (caminho varia entre distros)
+
+# Descobre a libm da glibc
+detect_glibc_libm() {
+  for p in /lib64/libm.so.6 /usr/lib64/libm.so.6 /usr/lib/x86_64-linux-gnu/libm.so.6; do
+    [ -f "$p" ] && { echo "$p"; return 0; }
+  done
+  command -v ldconfig >/dev/null 2>&1 && ldconfig -p | awk '/libm\.so\.6/{print $NF; exit}'
+}
+
+# Executa ./compile do WPS com /bin/csh protegido contra libimf.so
+wps_compile_safe() {
+  local libm; libm="$(detect_glibc_libm)"
+  if [ -n "$libm" ]; then
+    echo ">>> WPS compile: LD_PRELOAD=$libm (protegendo csh do IFUNC cosf)"
+    env LD_PRELOAD="$libm" ./compile
+  else
+    local CLEAN_LDLP
+    CLEAN_LDLP="$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '/opt/intel/oneapi/compiler/' | paste -sd: -)"
+    echo ">>> WPS compile: rodando com LD_LIBRARY_PATH saneado (sem oneAPI compiler)"
+    env LD_LIBRARY_PATH="$CLEAN_LDLP" ./compile
+  fi
+}
+
+
+
+detect_glibc_libm() {
+  for p in /lib64/libm.so.6 /usr/lib64/libm.so.6 /usr/lib/x86_64-linux-gnu/libm.so.6; do
+    [ -f "$p" ] && { echo "$p"; return 0; }
+  done
+  # último recurso: tenta ldconfig
+  if command -v ldconfig >/dev/null 2>&1; then
+    ldconfig -p | awk '/libm\.so\.6/{print $NF; exit}'
+  fi
+}
+
+# Executa o ./compile com csh blindado contra libimf
+wrf_compile_safe() {
+  local libm
+  libm="$(detect_glibc_libm)"
+  if [ -n "$libm" ]; then
+    echo ">>> WRF compile: LD_PRELOAD=$libm (protegendo /bin/csh do IFUNC cosf)"
+    env LD_PRELOAD="$libm" ./compile -j "$CPU_HALF_EVEN" em_real
+  else
+    # Fallback: remove o diretório da oneAPI compiler do LD_LIBRARY_PATH só durante o csh
+    local CLEAN_LDLP
+    CLEAN_LDLP="$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '/opt/intel/oneapi/compiler/' | paste -sd: -)"
+    echo ">>> WRF compile: rodando com LD_LIBRARY_PATH saneado para /bin/csh"
+    env LD_LIBRARY_PATH="$CLEAN_LDLP" ./compile -j "$CPU_HALF_EVEN" em_real
+  fi
+}
 
 # Check if the WRF installation option is enabled
 if [ "${OPTIONS[12]}" -eq 1 ]; then
-
+    
     echo ">> Starting WRF installation..."
 	# Enable support for large NetCDF files
 	export WRFIO_NCD_LARGE_FILE_SUPPORT=1
-	
+	export PNETCDF="$LIBS_DIR"
+    export PNETCDF_PATH="$LIBS_DIR"
+    export PNETCDF_LIB="-L$LIBS_DIR/lib -lpnetcdf"
+    export PNETCDF_INC="-I$LIBS_DIR/include"
     # Set compiler flags to include headers and link libraries from NetCDF and MPI
     export CPPFLAGS="-I$LIBS_DIR/include -I$MPI_DIR/include"
     export LDFLAGS="-L$LIBS_DIR/lib -L$MPI_DIR/lib"
@@ -959,100 +1745,306 @@ if [ "${OPTIONS[12]}" -eq 1 ]; then
     #vim configure.wrf
 
     # Compile WRF with parallel jobs based on available CPU cores
-    ./compile -j "$CPU_HALF_EVEN" em_real
+    wrf_compile_safe
 
     # Display the resulting executables
     echo -e "\n>> WRF build completed."
-    ls -ltr main/*.exe
+    ls_clean -ltr main/*.exe
 
     # Prompt user to continue (if enabled)
     [ "$PROMPTOK" -eq 1 ] && read -p "WRF build done. Press enter to continue..."
 fi
 
 
-#-----------------------------------------------------------------------------------
-#
-#
-#                  WPS 
-#
-# Check if the WPS installation option is enabled
+# # ===============================
+#            WPS (dmpar, Intel MPICH do LIBS_DIR)
+# ===============================
 if [ "${OPTIONS[13]}" -eq 1 ]; then
-    echo ">> Starting WPS installation..."
+  echo ">> WPS: dmpar com MPICH do prefixo e NetCDF/HDF5 do LIBS_DIR"
 
-    # Navigate to the installation directory and clone the WPS repository
-	# Set compiler flags to include headers and link libraries from NetCDF and MPI
-    export CPPFLAGS="-I$LIBS_DIR/include -I$MPI_DIR/include"
-    export LDFLAGS="-L$LIBS_DIR/lib -L$MPI_DIR/lib"
-	export LIBS="-lhdf5_hl -lhdf5 -lz -ldl"
-	cd $INSTALL_DIR
-	rm -rf WPS
+  # Prefixos
+  : "${LIBS_DIR:="$HOME/MODELS/$COMPILER"}"
+  : "${INSTALL_DIR:="$HOME/MODELS/$COMPILER"}"
+  : "${DOWNLOADS:="$HOME/Downloads"}"
 
+  # PATH: prioriza seus wrappers e configs
+  case ":$PATH:" in *":$LIBS_DIR/bin:"*) : ;; *) export PATH="$LIBS_DIR/bin:$PATH";; esac
+
+  # Se só existir mpifort, cria alias mpif90 (muitos Makefiles usam mpif90)
+  if [ -x "$LIBS_DIR/bin/mpifort" ] && [ ! -e "$LIBS_DIR/bin/mpif90" ]; then
+    ( cd "$LIBS_DIR/bin" && ln -sf mpifort mpif90 )
+  fi
+
+  # Checagem rápida dos wrappers
+  MPIF90="$LIBS_DIR/bin/mpif90"
+  MPICC="$LIBS_DIR/bin/mpicc"
+  if [ ! -x "$MPIF90" ] || [ ! -x "$MPICC" ]; then
+    echo ">>> WPS: SKIP — não achei $MPIF90 ou $MPICC. Verifique a instalação do MPICH no LIBS_DIR."
+    [ "$PROMPTOK" -eq 1 ] && read -p "WPS skipped. Press ENTER..."
+  else
+    # Usa APENAS seus headers/libs locais
+    export NETCDF="$LIBS_DIR"
+    export CPPFLAGS="-I$LIBS_DIR/include"
+    export LDFLAGS="-L$LIBS_DIR/lib"
+    export LIBS="-lhdf5_hl -lhdf5 -lz -ldl"
+
+    # helpers para contornar o IFUNC cosf
+    detect_glibc_libm() {
+      for p in /lib64/libm.so.6 /usr/lib64/libm.so.6 /usr/lib/x86_64-linux-gnu/libm.so.6; do
+        [ -f "$p" ] && { echo "$p"; return 0; }
+      done
+      command -v ldconfig >/dev/null 2>&1 && ldconfig -p | awk '/libm\.so\.6/{print $NF; exit}'
+    }
+    safe_run_csh() {
+      local libm; libm="$(detect_glibc_libm)"
+      if [ -n "$libm" ]; then env LD_PRELOAD="$libm" "$@"; else env -u LD_LIBRARY_PATH "$@"; fi
+    }
+    safe_ls() {
+      local libm; libm="$(detect_glibc_libm)"
+      if [ -n "$libm" ]; then env LD_PRELOAD="$libm" ls -ltr "$@"; else env -u LD_LIBRARY_PATH ls -ltr "$@"; fi
+    }
+
+    # (re)cria WPS limpo
+    cd "$INSTALL_DIR" || echo "AVISO: não consegui entrar em $INSTALL_DIR"
+    rm -rf WPS
     git clone https://github.com/wrf-model/WPS.git
-    cd WPS
-
-    # Clean any previous build artifacts
+    cd WPS || echo "AVISO: WPS não clonado"
     ./clean
 
-    # Launch interactive configuration
-    # Option 3 = gfortran with distributed memory support
+    # configure interativo (escolha qualquer; vamos forçar dmpar + wrappers abaixo)
     ./configure
-	#
-	#  Force the HDF5 libraries to be included in the WPS configuration
-	#
+
+    # Força dmpar com seus wrappers (e linkador Fortran)
+    sed -i "s|^FC *=.*|FC = $MPIF90|" configure.wps
+    sed -i "s|^CC *=.*|CC = $MPICC|"  configure.wps
+    if grep -q '^LD *=.*' configure.wps; then
+      sed -i 's|^LD *=.*|LD = $(FC)|' configure.wps
+    else
+      echo 'LD = $(FC)' >> configure.wps
+    fi
+
+    # Garante definição de MPI no preprocessador (caso a opção do menu não tenha injetado)
+    grep -q -- '-D_MPI' configure.wps || sed -i 's/^CPPFLAGS *=.*/& -D_MPI/' configure.wps
+
+    # Se os wrappers usam Intel (ifx/ifort), converte flags GNU -> Intel (idempotente)
+    if ($MPIF90 -show 2>&1 | grep -Eiq 'ifx|ifort'); then
+      sed -i 's/-ffree-form/-free/g; s/-ffixed-form/-fixed/g; s/-fconvert=big-endian/-convert big_endian/g; s/-frecord-marker=4/-assume byterecl/g; s/-fallow-argument-mismatch//g' configure.wps
+    fi
+
+    # Garante HDF5 no link
     sed -i 's|-L$(NETCDF)/lib -lnetcdff -lnetcdf|-L$(NETCDF)/lib -lnetcdff -lnetcdf -lhdf5_hl -lhdf5 -lz -ldl|' configure.wps
-     #vim configure.wps 
-    # Compile WPS using parallel jobs based on available CPU cores
-    ./compile  
 
-    # Display the resulting executables
-    echo -e "\n>> WPS build completed."
-    ls -ltr geogrid/src/geogrid.exe metgrid/src/metgrid.exe ungrib/src/ungrib.exe
+    # Compila (protege /bin/csh do IFUNC cosf)
+    if safe_run_csh ./compile; then
+      echo -e "\n>> WPS: build finalizado — listando executáveis:"
+    else
+      echo ">>> AVISO: ./compile retornou erro (verifique mensagens acima)."
+    fi
 
-    # Prompt user to continue (if enabled)
-    [ "$PROMPTOK" -eq 1 ] && read -p "WPS build done. Press enter to continue..."
+    # Lista executáveis sem segfault
+    for exe in geogrid/src/geogrid.exe metgrid/src/metgrid.exe ungrib/src/ungrib.exe; do
+      if [ -f "$exe" ]; then
+        safe_ls "$exe"
+      else
+        echo ">>> AVISO: faltou gerar $exe"
+      fi
+    done
+
+    [ "$PROMPTOK" -eq 1 ] && read -p "WPS dmpar step done. Press ENTER..."
+  fi
+fi
+
+
+
+
+
+
+
+
+
+################################# MPAS-ATMOSPHERE ################################
+# USE_PIO2 over PIO1
+##################################################################################
+if [ "${OPTIONS[14]}" -eq 1 ]; then
+  echo ">> Starting MPAS installation..."
+
+  # --- Prefixo LIMPO (sem / no final) e wrappers MPI do seu MPICH ---
+  PREFIX="${LIBS_DIR%/}"
+  export PATH="$PREFIX/bin:$PATH"
+  hash -r
+
+  # --- Paths para as libs (o Makefile do MPAS usa isso) ---
+  export NETCDF="$PREFIX"
+  export PNETCDF="$PREFIX"
+  export PIO="$PREFIX"
+  export HDF5="$PREFIX"
+  export LD_LIBRARY_PATH="$PREFIX/lib:$LD_LIBRARY_PATH"
+
+  # (ajuda a linkar estático quando necessário)
+  export MPAS_EXTERNAL_INCLUDES="-I$LIBS_DIR/include"
+  export MPAS_EXTERNAL_LIBS="\
+  $LIBS_DIR/lib/libpiof.a \
+  $LIBS_DIR/lib/libpioc.a \
+  $LIBS_DIR/lib/libnetcdff.a \
+  $LIBS_DIR/lib/libnetcdf.a \
+  $LIBS_DIR/lib/libhdf5_hl.a \
+  $LIBS_DIR/lib/libhdf5.a \
+  -lz -ldl -lm -lpthread"   # acrescente -lcurl se o seu netcdf precisar
+
+  # --- Escolhe wrappers MPI locais (MPICH do PREFIX/bin). Fallback p/ mpif90 se mpifort não existir ---
+  MPICC="$PREFIX/bin/mpicc"
+  MPICXX="$PREFIX/bin/mpicxx"
+  MPIFC="$PREFIX/bin/mpifort"; [ -x "$MPIFC" ] || MPIFC="$PREFIX/bin/mpif90"
+
+  # Sanidade mínima
+  [ -x "$MPICC" ] || { echo "ERRO: não achei $MPICC"; exit 1; }
+  [ -x "$MPIFC" ] || { echo "ERRO: não achei $MPIFC"; exit 1; }
+  [ -f "$PREFIX/include/pnetcdf.h" ] || { echo "ERRO: faltando $PREFIX/include/pnetcdf.h"; exit 1; }
+  [ -f "$PREFIX/lib/libpnetcdf.a" ] || { echo "ERRO: faltando $PREFIX/lib/libpnetcdf.a"; exit 1; }
+
+  # --- Clone limpo ---
+  cd "$INSTALL_DIR"
+  rm -rf MPAS-Model
+  git clone https://github.com/MPAS-Dev/MPAS-Model.git
+  cd MPAS-Model
+
+  # --- TESTE RÁPIDO do PnetCDF com o SEU mpicc (evita erro críptico do Makefile) ---
+  # rm -f pnetcdf.out
+  # "$MPICC" pnetcdf.c -I"$PREFIX/include" -L"$PREFIX/lib" -lpnetcdf -o pnetcdf.out \
+  #   || { echo "ERRO: falhou o teste pnetcdf.c com $MPICC. Verifique include/lib do PREFIX."; exit 1; }
+
+  # --- Build coerente com o COMPILER e forçando os wrappers paralelos ---
+  case "$COMPILER" in
+    GNU)
+      echo ">> MPAS compiling with GNU (gfortran target)"
+      make gfortran CORE=init_atmosphere USE_PIO2=true PRECISION=single \
+           CC_PARALLEL="$MPICC" CXX_PARALLEL="$MPICXX" FC_PARALLEL="$MPIFC"
+      make clean CORE=atmosphere USE_PIO2=true PRECISION=single
+      make gfortran CORE=atmosphere USE_PIO2=true PRECISION=single -j"$CPU_HALF_EVEN" \
+           CC_PARALLEL="$MPICC" CXX_PARALLEL="$MPICXX" FC_PARALLEL="$MPIFC"
+      ;;
+    INTEL)
+      echo ">> MPAS compiling with INTEL (intel target)"
+      make intel CORE=init_atmosphere USE_PIO2=true PRECISION=single \
+           CC_PARALLEL="$MPICC" CXX_PARALLEL="$MPICXX" FC_PARALLEL="$MPIFC"
+      make clean CORE=atmosphere USE_PIO2=true PRECISION=single
+      make intel CORE=atmosphere USE_PIO2=true PRECISION=single -j"$CPU_HALF_EVEN" \
+           CC_PARALLEL="$MPICC" CXX_PARALLEL="$MPICXX" FC_PARALLEL="$MPIFC"
+      ;;
+    NVIDIA)
+      echo ">> MPAS compiling with NVIDIA HPC (nvhpc target)"
+      make nvhpc CORE=init_atmosphere USE_PIO2=true PRECISION=single \
+           CC_PARALLEL="$MPICC" CXX_PARALLEL="$MPICXX" FC_PARALLEL="$MPIFC"
+      make clean CORE=atmosphere USE_PIO2=true PRECISION=single
+      make nvhpc CORE=atmosphere USE_PIO2=true PRECISION=single -j"$CPU_HALF_EVEN" \
+           CC_PARALLEL="$MPICC" CXX_PARALLEL="$MPICXX" FC_PARALLEL="$MPIFC"
+      ;;
+    *)
+      echo "ERRO: COMPILER=$COMPILER não reconhecido para MPAS."; exit 1;;
+  esac
+
+  [ "$PROMPTOK" -eq 1 ] && read -p "MPAS build done. Press enter to continue..."
 fi
 
 
 
 #-----------------------------------------------------------------------------------
 ################################# MPAS-ATMOSPHERE ################################
-# USE_PIO2 over PIO1 due to error, shouldn't affect build
-##################################################################################
-if [ "${OPTIONS[14]}" -eq 1 ]; then
-    echo ">> Starting MPAS installation..."
-    #
-    #
-    
-	
-	cd "$INSTALL_DIR"
-	rm -rf MPAS-Model 
-	git clone https://github.com/MPAS-Dev/MPAS-Model.git
-	cd MPAS-Model
-	export MPAS_EXTERNAL_LIBS="-L$LIBS_DIR/lib -lnetcdf -lpnetcdf -lhdf5_hl -lhdf5 -ldl -lz"
-	export MPAS_EXTERNAL_INCLUDES="-I$LIBS_DIR/include"
-	
-	# GNU 
-	if [ "$COMPILER" == "GNU" ]; then
-	    echo ">> MPAS compiling GNU "
-		make gfortran CORE=init_atmosphere USE_PIO2=true PRECISION=single
-		make clean CORE=atmosphere USE_PIO2=true PRECISION=single
-		make gfortran CORE=atmosphere USE_PIO2=true PRECISION=single
-	elif [ "$COMPILER" == "INTEL" ]; then
-		echo ">> MPAS compiling INTEL "
-		make intel CORE=init_atmosphere USE_PIO2=true PRECISION=single
-		make clean CORE=atmosphere USE_PIO2=true PRECISION=single
-		make gfortran CORE=atmosphere USE_PIO2=true PRECISION=single
-	elif [ "$COMPILER" == "NVIDIA" ]; then
-		echo "> compiling NVIDIA HPC "
-		make nvhpc CORE=init_atmosphere USE_PIO2=true PRECISION=single
-		make clean CORE=atmosphere USE_PIO2=true PRECISION=single
-		make gfortran CORE=atmosphere USE_PIO2=true PRECISION=single
-    fi 
+# VERSÃO ESPECÍFICA: v7.0  (PIO2)
+#-----------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------
+################################# MPAS-ATMOSPHERE ################################
+# VERSAO ESPECIFICA: v7.0 (PIO2)
+#-----------------------------------------------------------------------------------
+if [ "${OPTIONS[15]}" -eq 1 ]; then
+    echo ">> Starting MPAS 7.0 installation..."
 
-    # Prompt user to continue (if enabled)
+    cd "$INSTALL_DIR"
+    rm -rf MPAS-7.0
+    git clone https://github.com/MPAS-Dev/MPAS-Model.git MPAS-7.0
+    cd MPAS-7.0
+    git checkout tags/v7.0
+
+    # ---- Prefixos das bibliotecas (AJUSTE se necessário) ----
+      # você informou que é aqui
+    export NETCDF="$LIBS_DIR"          # prefixo do NetCDF (include/ e lib/)
+    export PNETCDF="$LIBS_DIR"         # prefixo do PnetCDF (include/ e lib/)
+    export PIOSRC="$DOWNLOADS/ParallelIO-pio$Pio_Version/"    
+    # (opcional) para .so
+    export LD_LIBRARY_PATH="$PIO/lib:$PNETCDF/lib:$NETCDF/lib:${LD_LIBRARY_PATH:-}"
+    export PIO=$DOWNLOADS"/pio" 
+    echo $PIO
+    read -p "q"
+    # ---- Compilação ----
+    if [ "$COMPILER" = "GNU" ]; then
+        echo ">> MPAS compiling with GNU (fix BOZ)"
+        # fix BOZ: necessário para gfortran >= 10
+        EXTRA_FFLAGS="-fallow-invalid-boz -std=legacy"
+
+        # init_atmosphere
+        make gfortran CORE=init_atmosphere USE_PIO2=true PRECISION=single \
+              NETCDF="$NETCDF" PNETCDF="$PNETCDF"               \
+             FFLAGS+="$EXTRA_FFLAGS" || exit 2
+
+        make clean CORE=atmosphere
+
+        # atmosphere
+        make gfortran CORE=atmosphere      USE_PIO2=true PRECISION=single \
+              NETCDF="$NETCDF" PNETCDF="$PNETCDF"               \
+             FFLAGS+="$EXTRA_FFLAGS" || exit 2
+
+    elif [ "$COMPILER" = "INTEL" ]; then
+        echo ">> MPAS compiling with INTEL"
+        make intel   CORE=init_atmosphere USE_PIO2=true PRECISION=single  \
+             PIO="$PIO" NETCDF="$NETCDF" PNETCDF="$PNETCDF" || exit 2
+
+        make clean   CORE=atmosphere
+
+        make intel   CORE=atmosphere      USE_PIO2=true PRECISION=single  \
+             PIO="$PIO" NETCDF="$NETCDF" PNETCDF="$PNETCDF" || exit 2
+
+    elif [ "$COMPILER" = "NVIDIA" ]; then
+        echo ">> MPAS compiling with NVIDIA HPC"
+        make nvhpc   CORE=init_atmosphere USE_PIO2=true PRECISION=single  \
+             PIO="$PIO" NETCDF="$NETCDF" PNETCDF="$PNETCDF" || exit 2
+
+        make clean   CORE=atmosphere
+
+        make nvhpc   CORE=atmosphere      USE_PIO2=true PRECISION=single  \
+             PIO="$PIO" NETCDF="$NETCDF" PNETCDF="$PNETCDF" || exit 2
+    fi
+
     [ "$PROMPTOK" -eq 1 ] && read -p "MPAS build done. Press enter to continue..."
-
-fi 
-
+fi
 
 
+
+if [ "${OPTIONS[16]}" -eq 1 ]; then
+
+
+    cd "$DOWNLOADS"
+
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_high_res_mandatory.tar.gz
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_noahmp.tar.gz
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_thompson28_chem.tar.gz
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/irrigation.tar.gz
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_px.tar.gz
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_urban.tar.gz
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_ssib.tar.gz
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/lake_depth.tar.bz2
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/modis_landuse_20class_30s_with_lakes.tar.bz2
+    wget -nc https://www2.mmm.ucar.edu/wrf/src/wps_files/modis_landuse_20class_30s.tar.bz2
+    tar -xvzf geog_high_res_mandatory.tar.gz -C $GEOG/WPS_GEOG
+    tar -xvzf geog_thompson28_chem.tar.gz -C $GEOG/WPS_GEOG
+    tar -xvzf geog_noahmp.tar.gz -C $GEOG/WPS_GEOG
+    tar -xvzf irrigation.tar.gz -C $GEOG/WPS_GEOG
+    tar -xvzf geog_px.tar.gz -C $GEOG/WPS_GEOG
+    tar -xvzf geog_urban.tar.gz -C $GEOG/WPS_GEOG
+    tar -xvzf geog_ssib.tar.gz -C $GEOG/WPS_GEOG
+    tar -xvf lake_depth.tar.bz2 -C $GEOG/WPS_GEOG
+    tar -xvf modis_landuse_20class_30s_with_lakes.tar.bz2 -C $GEOG/WPS_GEOG
+    tar -xvf modis_landuse_20class_30s.tar.bz2 -C $GEOG/WPS_GEOG
+    # Prompt user to continue (if enabled)
+    [ "$PROMPTOK" -eq 1 ] && read -p "GEOG pronto. verifique. Press enter to continue."
+
+fi

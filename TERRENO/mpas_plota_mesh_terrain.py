@@ -314,9 +314,9 @@ def parse_args():
 
     # se usar extent cli
     p.add_argument("--lon-min", type=float, default=-80.0,
-                   help="Longitude mínima (0–360 ou -180–180) para --extent-mode cli.")
+                   help="Longitude mínima (0-360 ou -180-180) para --extent-mode cli.")
     p.add_argument("--lon-max", type=float, default=-30.0,
-                   help="Longitude máxima (0–360 ou -180–180) para --extent-mode cli.")
+                   help="Longitude máxima (0-360 ou -180-180) para --extent-mode cli.")
     p.add_argument("--lat-min", type=float, default=-50.0,
                    help="Latitude mínima para --extent-mode cli.")
     p.add_argument("--lat-max", type=float, default=10.0,
@@ -324,7 +324,7 @@ def parse_args():
 
     # margem quando extent = data
     p.add_argument("--pad-frac", type=float, default=0.01,
-                   help="Margem relativa no extent 'data' (default: 0.01 = 1%).")
+                   help="Margem relativa no extent 'data' (default: 0.01 = 1%%).")
 
     # centro ortográfico
     p.add_argument("--center-lon", type=float, default=-50.0,

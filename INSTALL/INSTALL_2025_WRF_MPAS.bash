@@ -51,14 +51,145 @@ OPTIONS=(
    )
 #-------------------------------------------------------------------------------
 MODELS=(
-    0  ### [0] WRF 
-    1  ### [1] WPS
+    1  ### [0] WRF 
+    0  ### [1] WPS
     0  ### [2] MPAS
     0  ### [3] GEOG (DADOS TERRENO)         MPAS/WRF 
     0  ### [4] MAPS 7.0 
     0  ### [5] ICON  (AINDA NAO IMPLEMENTADO)
 
  )
+
+ # -----------------------------------------------------------------------
+#
+#            COMPILER (default: gnu) 
+#
+#
+# Use default COMPILER if not defined by user
+#COMPILER=
+COMPILER=${COMPILER:-GNU}
+
+#---------------------------------------------------------------------------
+#
+#        INSTALL LOCAL 
+#
+#
+HOME_DIR=$HOME
+INSTALLATION_PATH="$HOME_DIR/MODELS"
+export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
+GEOG="$HOME_DIR/MODELS/GEOG/"
+
+#------------------------------------------------------------------------------
+#
+# Define download directory
+#
+#
+#
+export DOWNLOADS="$HOME/Downloads"
+
+
+
+#-------------------------------------------------------------------------------------------------
+# PARALLEL_VERSION
+# 0: Build in serial mode — libraries are compiled with the base compilers (CC/CXX/FC).
+# 1: Build in MPI mode — all libraries are compiled using MPI wrapper compilers, i.e.:
+#    CC  -> MPICC   (mpicc or mpiicc)
+#    CXX -> MPICXX  (mpicxx or mpiicpc)
+#    FC  -> MPIFC   (mpifort or mpiifort)
+#    The exact wrappers are selected by mpi_setup():
+#      - MPICH when INTEL_MPI=0 (any COMPILER)
+#      - Intel MPI when COMPILER=INTEL and INTEL_MPI=1
+#    Make sure the chosen MPI is on PATH (and its libs on LD_LIBRARY_PATH) before building.
+#    Note: Only the compilation of libraries/programs switches to wrappers; system tools
+#    (tar, ls, etc.) should run in a clean environment when oneAPI is loaded.
+#
+# Directory layout also reflects this choice (see INSTALL_DIR/LIBS_DIR/MPI_DIR rules).
+#------------------------------------------------------------------------------------------
+#   - GNU/NVIDIA:
+#       PARALLEL_VERSION=0  -> INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
+#       PARALLEL_VERSION=1  -> INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPICH"
+#   - INTEL:
+#       INTEL_MPI=0, PARALLEL_VERSION=0 -> "$INSTALLATION_PATH/INTEL/"
+#       INTEL_MPI=0, PARALLEL_VERSION=1 -> "$INSTALLATION_PATH/INTEL/MPICH"
+#       INTEL_MPI=1, PARALLEL_VERSION=0 -> "$INSTALLATION_PATH/INTEL/MPI_INTEL"
+#       INTEL_MPI=1, PARALLEL_VERSION=1 -> "$INSTALLATION_PATH/INTEL/MPI_MPICH_INTEL"
+#---------------------------------------------------------------------------------------------
+PARALLEL_VERSION=${PARALLEL_VERSION:-0}
+
+# -----------------------------------------------------------------------------
+# INTEL MPI MODE (COMPILER=INTEL, PARALLEL_VERSION=1, INTEL_MPI=1)
+# -----------------------------------------------------------------------------
+# Summary
+#   When building in parallel with Intel MPI, ALL third-party libraries and models
+#   are compiled with Intel MPI wrapper compilers:
+#       CC  -> mpiicc      (C with Intel MPI)
+#       CXX -> mpiicpc     (C++ with Intel MPI)
+#       FC  -> mpiifort    (Fortran with Intel MPI; uses ifx when available)
+#   The script’s mpi_setup() exports MPICC/MPICXX/MPIFC accordingly.
+
+
+# Environment prerequisites
+#   - Load oneAPI environment before running this script:
+#         source /opt/intel/oneapi/setvars.sh
+#     This sets I_MPI_ROOT and adds Intel MPI tools to PATH.
+#   - Ensure PATH and LD_LIBRARY_PATH include Intel MPI dirs:
+#         PATH="$I_MPI_ROOT/bin:$PATH"
+#         LD_LIBRARY_PATH="$I_MPI_ROOT/lib:$LD_LIBRARY_PATH"
+#
+# Directory layout (derived automatically by the script)
+#   INSTALL_DIR="$INSTALLATION_PATH/INTEL/MPI_MPICH_INTEL"
+#   LIBS_DIR="$INSTALL_DIR/"
+#   MPI_DIR="$LIBS_DIR/"
+#   (Name reflects “parallel + Intel MPI” per project convention.)
+#
+# Build switches
+#   - Set PARALLEL_VERSION=1 and INTEL_MPI=1.
+#   - Skip MPICH build step (OPTIONS[3]=0) — Intel MPI replaces it.
+#
+# Autotools/CMake tips
+#   - Autotools packages: just rely on the wrappers; do NOT hardcode -lmpi.
+#       env CC=mpiicc CXX=mpiicpc FC=mpiifort ./configure ...
+#   - CMake packages: you can hint the MPI compilers explicitly if needed:
+#       -DMPI_C_COMPILER=mpiicc -DMPI_CXX_COMPILER=mpiicpc -DMPI_Fortran_COMPILER=mpiifort
+#   - Do NOT mix MPI stacks (e.g., MPICH headers/libs) with Intel MPI in the same build.
+#
+# Verification
+#   - which mpiifort ; mpiifort --version
+#   - which mpirun   ; mpirun  --version
+#   - At runtime: mpirun -np <N> ./your_program
+#
+# Known pitfalls / notes
+#   - Do not override CC/CXX/FC with base compilers when PARALLEL_VERSION=1; wrappers must be used.
+#   - Avoid leaking other MPI implementations into PATH ahead of $I_MPI_ROOT/bin.
+#   - For Fortran logical interop warnings when building HDF5 Fortran with ifx, add:
+#         FCFLAGS="... -fpscomp logicals"
+#   - You generally don’t need to add -lmpi manually; wrappers handle link lines.
+# -----------------------------------------------------------------------------
+
+INTEL_MPI=${INTEL_MPI:-0}
+
+#-----------------------------------------------------------------------------
+#
+#   Library versions   
+#
+#
+# ----------------------------------------------------------------------------
+#
+
+
+export HDF5_Version="1_14_2"
+export Zlib_Version="1.3.1"
+export Netcdf_C_Version="4.9.2"
+export Netcdf_Fortran_Version="4.6.1"
+export Mpich_Version="4.2.1"
+export Libpng_Version="1.6.39"
+export Jasper_Version="1.900.1"
+export Pnetcdf_Version="1.12.3"
+export Pio_Version="2_5_9"
+export jpeg_version="2.5.3"
+export ecc_version=2.41.0
+
+
 #----------------------------------------------------------------------------------------
 #
 #                     CPU RESOURCE MANAGEMENT
@@ -130,134 +261,6 @@ else
 fi
 
 
-# -----------------------------------------------------------------------
-#
-#            COMPILER (default: gnu) 
-#
-#
-# Use default COMPILER if not defined by user
-#COMPILER=
-COMPILER=${COMPILER:-GNU}
-
-#---------------------------------------------------------------------------
-#
-#        INSTALL LOCAL 
-#
-#
-HOME_DIR=$HOME
-INSTALLATION_PATH="$HOME_DIR/MODELS"
-export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
-GEOG="$HOME_DIR/MODELS/GEOG/"
-
-#------------------------------------------------------------------------------
-#
-# Define download directory
-#
-#
-#
-export DOWNLOADS="$HOME/Downloads"
-
-
-
-#-------------------------------------------------------------------------------------------------
-# PARALLEL_VERSION
-# 0: Build in serial mode — libraries are compiled with the base compilers (CC/CXX/FC).
-# 1: Build in MPI mode — all libraries are compiled using MPI wrapper compilers, i.e.:
-#    CC  -> MPICC   (mpicc or mpiicc)
-#    CXX -> MPICXX  (mpicxx or mpiicpc)
-#    FC  -> MPIFC   (mpifort or mpiifort)
-#    The exact wrappers are selected by mpi_setup():
-#      - MPICH when INTEL_MPI=0 (any COMPILER)
-#      - Intel MPI when COMPILER=INTEL and INTEL_MPI=1
-#    Make sure the chosen MPI is on PATH (and its libs on LD_LIBRARY_PATH) before building.
-#    Note: Only the compilation of libraries/programs switches to wrappers; system tools
-#    (tar, ls, etc.) should run in a clean environment when oneAPI is loaded.
-#
-# Directory layout also reflects this choice (see INSTALL_DIR/LIBS_DIR/MPI_DIR rules).
-#------------------------------------------------------------------------------------------
-#   - GNU/NVIDIA:
-#       PARALLEL_VERSION=0  -> INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
-#       PARALLEL_VERSION=1  -> INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPICH"
-#   - INTEL:
-#       INTEL_MPI=0, PARALLEL_VERSION=0 -> "$INSTALLATION_PATH/INTEL/"
-#       INTEL_MPI=0, PARALLEL_VERSION=1 -> "$INSTALLATION_PATH/INTEL/MPICH"
-#       INTEL_MPI=1, PARALLEL_VERSION=0 -> "$INSTALLATION_PATH/INTEL/MPI_INTEL"
-#       INTEL_MPI=1, PARALLEL_VERSION=1 -> "$INSTALLATION_PATH/INTEL/MPI_MPICH_INTEL"
-#---------------------------------------------------------------------------------------------
-PARALLEL_VERSION=${PARALLEL_VERSION:-0}
-
-# -----------------------------------------------------------------------------
-# INTEL MPI MODE (COMPILER=INTEL, PARALLEL_VERSION=1, INTEL_MPI=1)
-# -----------------------------------------------------------------------------
-# Summary
-#   When building in parallel with Intel MPI, ALL third-party libraries and models
-#   are compiled with Intel MPI wrapper compilers:
-#       CC  -> mpiicc      (C with Intel MPI)
-#       CXX -> mpiicpc     (C++ with Intel MPI)
-#       FC  -> mpiifort    (Fortran with Intel MPI; uses ifx when available)
-#   The script’s mpi_setup() exports MPICC/MPICXX/MPIFC accordingly.
-#
-# Environment prerequisites
-#   - Load oneAPI environment before running this script:
-#         source /opt/intel/oneapi/setvars.sh
-#     This sets I_MPI_ROOT and adds Intel MPI tools to PATH.
-#   - Ensure PATH and LD_LIBRARY_PATH include Intel MPI dirs:
-#         PATH="$I_MPI_ROOT/bin:$PATH"
-#         LD_LIBRARY_PATH="$I_MPI_ROOT/lib:$LD_LIBRARY_PATH"
-#
-# Directory layout (derived automatically by the script)
-#   INSTALL_DIR="$INSTALLATION_PATH/INTEL/MPI_MPICH_INTEL"
-#   LIBS_DIR="$INSTALL_DIR/"
-#   MPI_DIR="$LIBS_DIR/"
-#   (Name reflects “parallel + Intel MPI” per project convention.)
-#
-# Build switches
-#   - Set PARALLEL_VERSION=1 and INTEL_MPI=1.
-#   - Skip MPICH build step (OPTIONS[3]=0) — Intel MPI replaces it.
-#
-# Autotools/CMake tips
-#   - Autotools packages: just rely on the wrappers; do NOT hardcode -lmpi.
-#       env CC=mpiicc CXX=mpiicpc FC=mpiifort ./configure ...
-#   - CMake packages: you can hint the MPI compilers explicitly if needed:
-#       -DMPI_C_COMPILER=mpiicc -DMPI_CXX_COMPILER=mpiicpc -DMPI_Fortran_COMPILER=mpiifort
-#   - Do NOT mix MPI stacks (e.g., MPICH headers/libs) with Intel MPI in the same build.
-#
-# Verification
-#   - which mpiifort ; mpiifort --version
-#   - which mpirun   ; mpirun  --version
-#   - At runtime: mpirun -np <N> ./your_program
-#
-# Known pitfalls / notes
-#   - Do not override CC/CXX/FC with base compilers when PARALLEL_VERSION=1; wrappers must be used.
-#   - Avoid leaking other MPI implementations into PATH ahead of $I_MPI_ROOT/bin.
-#   - For Fortran logical interop warnings when building HDF5 Fortran with ifx, add:
-#         FCFLAGS="... -fpscomp logicals"
-#   - You generally don’t need to add -lmpi manually; wrappers handle link lines.
-# -----------------------------------------------------------------------------
-
-INTEL_MPI=${INTEL_MPI:-0}
-
-#-----------------------------------------------------------------------------
-#
-#   Library versions   
-#
-#
-# ----------------------------------------------------------------------------
-#
-
-
-export HDF5_Version="1_14_2"
-export Zlib_Version="1.3.1"
-export Netcdf_C_Version="4.9.2"
-export Netcdf_Fortran_Version="4.6.1"
-export Mpich_Version="4.2.1"
-export Libpng_Version="1.6.39"
-export Jasper_Version="1.900.1"
-export Pnetcdf_Version="1.12.3"
-export Pio_Version="2_5_9"
-export jpeg_version="2.5.3"
-export ecc_version=2.41.0
-
 
 
 # --------------------------------------------------------------------
@@ -270,12 +273,16 @@ if [ "$COMPILER" = "INTEL" ]; then
     if [ "$PARALLEL_VERSION" = "1" ]; then
         if [ "$INTEL_MPI" = "1" ]; then
             export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPI_MPICH_INTEL"
+            export I_MPI_F90=ifx 
+            export I_MPI_CC=icx 
         else
             export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPICH"
         fi
     else
         if [ "$INTEL_MPI" = "1" ]; then
             export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/MPI_INTEL"
+            export I_MPI_F90 =ifx 
+            export I_MPI_CC=icx 
         else
             export INSTALL_DIR="$INSTALLATION_PATH/$COMPILER/"
         fi
@@ -804,7 +811,7 @@ echo "INFO: LD_LIBRARY_PATH começa com: $(echo "${LD_LIBRARY_PATH:-<vazio>}" | 
 #  TODO: 
 #  NVIDIA  
 #-----------------------------------------------------------------------------------
-if [ "${OPTIONS[3]}" -eq 1 ]; then
+if [ "${OPTIONS[3]}" -eq 1 ] && [ "$INTEL_MPI" -eq 0 ]; then
     echo ">>> [3] Starting MPICH installation..."
 
     cd "$DOWNLOADS" || { echo "ERROR: Cannot access download directory $DOWNLOADS"; exit 1; }
@@ -1091,29 +1098,39 @@ fi
 
 
 
-
 # ===================================================================================================================
-#
-#
-#
-#         PNETCDF Installation
-#
-#         SOMENTE PARALELO (PARALLEL_version=1)
-#
-# ====================================================================================================================
+# PNETCDF Installation — SOMENTE PARALELO
+# Requer Intel oneAPI carregado (setvars.sh) quando COMPILERS=INTEL
+# ===================================================================================================================
 if [ "${OPTIONS[8]}" -eq 1 ]; then
-    echo ">>> PNETCDF: preparando compilação com wrappers MPI (MPICH do LIBS_DIR/bin, se presente)."
+    echo ">>> PNETCDF: preparando compilação paralela"
+
+    # --- Ambiente Intel (se aplicável) ---
+    if [ "${COMPILERS:-INTEL}" = "INTEL" ]; then
+        # Garante bibliotecas/paths do oneAPI
+        if [ -f /opt/intel/oneapi/setvars.sh ]; then
+            # evita recarregar n vezes
+            if ! env | grep -q 'ONEAPI_ROOT='; then
+                # shellcheck disable=SC1091
+                source /opt/intel/oneapi/setvars.sh
+            fi
+        fi
+        # Amarra wrappers ao icx/ifx
+        export I_MPI_CC=${I_MPI_CC:-icx}
+        export I_MPI_FC=${I_MPI_FC:-ifx}
+    fi
 
     if mpi_setup; then
         echo ">>> PNETCDF: usando wrappers MPI: MPICC=$MPICC  MPIFC=$MPIFC"
     else
-        echo ">>> PNETCDF: SKIP — wrappers MPI não disponíveis (verifique MPICH em $LIBS_DIR/bin)."
+        echo ">>> PNETCDF: SKIP — wrappers MPI não disponíveis (verifique $LIBS_DIR/bin)."
         [ "$PROMPTOK" -eq 1 ] && read -p "PNETCDF skipped. Press ENTER to continue..."
         :
     fi
 
     if [ -n "$MPICC" ] && [ -n "$MPIFC" ]; then
         cd "$DOWNLOADS" || { echo "AVISO: sem acesso a $DOWNLOADS — pulando PnetCDF."; }
+
         SRCTGZ="pnetcdf-$Pnetcdf_Version.tar.gz"
         SRCDIR="pnetcdf-$Pnetcdf_Version"
 
@@ -1127,43 +1144,54 @@ if [ "${OPTIONS[8]}" -eq 1 ]; then
         if [ -n "$SRCTGZ" ] && cd "$SRCDIR" 2>/dev/null; then
             command -v autoreconf >/dev/null 2>&1 && autoreconf -i -f || true
 
-            # Flags locais (não poluem o ambiente global)
-            local_CFLAGS="${CFLAGS:-"-O2 -fPIC"}"
-            local_FCFLAGS="${FCFLAGS:-"-O2 -fPIC"}"
-            [ -n "$fallow_argument" ] && local_FCFLAGS="$local_FCFLAGS $fallow_argument"
-            [ -n "$boz_argument" ]   && local_FCFLAGS="$local_FCFLAGS $boz_argument"
+            # --- FLAGS SEGURAS POR COMPILADOR ---
+            local_CFLAGS="-O2 -fPIC"
+            local_FCFLAGS="-O2 -fPIC"
 
-            # configure sem eval e SEM CXX (pnetcdf não precisa)
+            # Zera flags GNU quando for Intel (evita -fallow-argument-mismatch, etc.)
+            if [ "${COMPILERS:-INTEL}" = "INTEL" ]; then
+                # não herdar variáveis globais de GNU
+                unset fallow_argument boz_argument
+            else
+                [ -n "$fallow_argument" ] && local_FCFLAGS="$local_FCFLAGS $fallow_argument"
+                [ -n "$boz_argument" ]   && local_FCFLAGS="$local_FCFLAGS $boz_argument"
+            fi
+
+            # Para Intel MPI, o caminho ajuda o configure a achar includes/libs do mpi
+            MPI_ROOT_GUESS="${I_MPI_ROOT:-/opt/intel/oneapi/mpi/latest}"
+
+            # --- CONFIGURE ---
             CC="$MPICC" FC="$MPIFC" CFLAGS="$local_CFLAGS" FCFLAGS="$local_FCFLAGS" \
             ./configure \
                 --prefix="$LIBS_DIR" \
                 --disable-shared \
                 --enable-static \
-                --disable-dependency-tracking
+                --disable-dependency-tracking \
+                ${MPI_ROOT_GUESS:+--with-mpi="$MPI_ROOT_GUESS"}
 
             if [ $? -eq 0 ]; then
-                # fallback para -j1 se CPU_HALF_EVEN não estiver setada
                 JN="${CPU_HALF_EVEN:-1}"
-                make -j "$JN" || { echo "AVISO: 'make' do PnetCDF falhou — pulando."; JN=1; }
-                make -j "$JN" install || echo "AVISO: 'make install' do PnetCDF falhou."
+                make -j "$JN"      || { echo "AVISO: 'make' do PnetCDF falhou — tentando -j1"; make -j1 || true; }
+                make -j1 install   || echo "AVISO: 'make install' do PnetCDF falhou."
 
-                # Testes MPI: use mpiexec do seu prefixo, 2 ranks costuma ser suficiente
+                # Teste rápido com mpiexec (2 ranks)
                 if [ -x "$LIBS_DIR/bin/mpiexec" ]; then
-                    make -j 1 check MPIRUN="$LIBS_DIR/bin/mpiexec -n 2" || echo "AVISO: 'make check' do PnetCDF teve falhas."
+                    make -j1 check MPIRUN="$LIBS_DIR/bin/mpiexec -n 2" || echo "AVISO: 'make check' teve falhas."
                 else
                     echo "AVISO: mpiexec não encontrado em $LIBS_DIR/bin — pulando 'make check'."
                 fi
 
                 echo -e "\n>> PNETCDF instalado em $LIBS_DIR/lib"
-                if command -v ls_clean >/dev/null 2>&1; then ls_clean -ltr "$LIBS_DIR/lib"; else ls -ltr "$LIBS_DIR/lib"; fi
+                command -v ls_clean >/dev/null 2>&1 && ls_clean -ltr "$LIBS_DIR/lib" || ls -ltr "$LIBS_DIR/lib"
 
-                # sanity quick check (se houver pnetcdf-config)
                 if [ -x "$LIBS_DIR/bin/pnetcdf-config" ]; then
-                    echo ">> pnetcdf-config --all (resumo):"
+                    echo ">> pnetcdf-config --all:"
                     "$LIBS_DIR/bin/pnetcdf-config" --all | egrep -i 'version|cc=|fc=|mpi'
                 fi
             else
-                echo "AVISO: 'configure' do PnetCDF falhou — pulando sem interromper o script."
+                echo "AVISO: 'configure' do PnetCDF falhou — dumping últimas linhas do config.log:"
+                tail -n 60 config.log 2>/dev/null | sed 's/^/    /'
+                echo "AVISO: pulando sem interromper o script."
             fi
         else
             echo "AVISO: fonte $SRCDIR não acessível — pulando PnetCDF."
@@ -1315,12 +1343,47 @@ if [ "${OPTIONS[11]}" -eq 1 ]; then
                 rm -rf build && mkdir build && cd build
 # ... (tudo igual até criar o diretório build)
 
+# ... (seu código até criar o diretório build)
+
 # Ambiente restrito SÓ para o PIO:
 (
-  # garante wrappers MPI apenas aqui dentro
+  # ============ INTEL oneAPI safeguards ============
+  if [ "${COMPILERS:-INTEL}" = "INTEL" ]; then
+    # Carrega oneAPI apenas se ainda não estiver carregado
+    if ! env | grep -q '^ONEAPI_ROOT=' && [ -f /opt/intel/oneapi/setvars.sh ]; then
+      # shellcheck disable=SC1091
+      source /opt/intel/oneapi/setvars.sh
+    fi
+    # Força wrappers a usarem icx/ifx (evita fallback no ifort)
+    export I_MPI_CC=${I_MPI_CC:-icx}
+    export I_MPI_CXX=${I_MPI_CXX:-icpx}
+    export I_MPI_FC=${I_MPI_FC:-ifx}
+  fi
+
+  # Garante que MPIFC use mpiifx se estivermos no stack Intel
+  if [ "${COMPILERS:-INTEL}" = "INTEL" ] && [ -n "${MPIFC:-}" ]; then
+    base="$(basename "$MPIFC")"
+    if [ "$base" = "mpiifort" ]; then
+      MPIFC="$(dirname "$MPIFC")/mpiifx"
+    fi
+  fi
+
+  # Bind explícito dos wrappers aqui dentro
   export CC="$MPICC"
   export CXX="$MPICXX"
   export FC="$MPIFC"
+
+  # Preflight: compila um "hello" Fortran para falhar cedo se o wrapper estiver ruim
+  echo "      program p; print *, 'ok'; end" > .f90test.f90
+  if ! "$FC" -c .f90test.f90 -o .f90test.o >/dev/null 2>&1; then
+    echo "ERRO: Wrapper Fortran ($FC) não compila teste simples. Verifique setvars.sh / I_MPI_FC=ifx."
+    exit 1
+  fi
+  rm -f .f90test.f90 .f90test.o
+
+  # Evita CMake cache sujo
+  rm -f CMakeCache.txt
+  rm -rf CMakeFiles
 
   export CMAKE_PREFIX_PATH="$LIBS_DIR:${CMAKE_PREFIX_PATH:-}"
 
@@ -1339,11 +1402,13 @@ if [ "${OPTIONS[11]}" -eq 1 ]; then
     ..
 
   if [ $? -eq 0 ]; then
-    make -j "$CPU_HALF_EVEN" && make -j "$CPU_HALF_EVEN" install || echo "AVISO: 'make install' do PIO falhou."
+    JN="${CPU_HALF_EVEN:-1}"
+    make -j "$JN" && make -j "$JN" install || echo "AVISO: 'make install' do PIO falhou."
   else
-    echo "AVISO: 'cmake' do PIO falhou — pulando sem interromper o script."
+    echo "AVISO: 'cmake' do PIO falhou — limpe o cache e confira I_MPI_FC=ifx / setvars.sh."
   fi
-)  # <-- fim do subshell: CC/CXX/FC NÃO afetam o restante do script
+)  # fim do subshell
+
 
             else
                 echo "AVISO: falha ao extrair pio$Pio_Version.tar.gz — pulando PIO."
@@ -1353,7 +1418,6 @@ if [ "${OPTIONS[11]}" -eq 1 ]; then
 
     [ "$PROMPTOK" -eq 1 ] && read -p "PIO step finished (built or skipped). Press ENTER to continue..."
 fi
-
 
 
 
@@ -1692,6 +1756,131 @@ fi
 #
 if [ "${MODELS[0]}" -eq 1 ]; then
 
+patch_wrfnc4_block() {
+  set -euo pipefail
+  local cfg="${1:-./configure}"
+  [ -f "$cfg" ] || { echo "ERRO: $cfg não existe."; return 1; }
+
+  # Idempotência: se já tiver nosso marcador, não faz nada
+  if grep -q "nc-config verified" "$cfg"; then
+    echo ">>> configure já patchado (nc-config verified)."
+    return 0
+  fi
+
+  # Backup
+  cp -p "$cfg" "${cfg}.bak"
+
+  # Bloco novo (substitui todo o trecho '# testing for netcdf4 IO features' original)
+  local blk
+  blk="$(mktemp)"
+  cat > "$blk" <<'EOF_BLK'
+# testing for netcdf4 IO features
+if [ -n "$NETCDF4" ] ; then
+  if [ $NETCDF4 -eq 1 ] ; then
+
+    # Caminho rápido: se nc-config reporta NC4, não precisa compilar o teste
+    if [ -x "$NETCDF_C/bin/nc-config" ] && [ "`$NETCDF_C/bin/nc-config --has-nc4 2>/dev/null`" = "yes" ]; then
+      echo "*****************************************************************************"
+      echo "This build of WRF will use NETCDF4 with HDF5 compression (nc-config verified)"
+      echo "*****************************************************************************"
+      echo " "
+
+    # Override manual (opcional): usuário pode forçar o skip do teste
+    elif [ "${NETCDF_ASSUME_NC4:-0}" = "1" ]; then
+      echo "*****************************************************************************"
+      echo "This build of WRF will use NETCDF4 with HDF5 compression (forced by NETCDF_ASSUME_NC4=1)"
+      echo "*****************************************************************************"
+      echo " "
+
+    else
+      # Caminho legado: roda o teste de link se não houve confirmação por nc-config
+      NC_INC="$("$NETCDF/bin/nc-config" --includedir 2>/dev/null)"
+      NC_LIBS="$("$NETCDF/bin/nc-config" --libs 2>/dev/null)"
+      export NC_INC NC_LIBS
+      if [ -n "$HDF5" ] && [ -d "$HDF5/lib" ]; then
+        export H5_LIBS="-L$HDF5/lib -lhdf5_hl -lhdf5"
+      fi
+
+      make nc4_test > tools/nc4_test.log 2>&1
+      retval=-1
+      if  [ -f tools/nc4_test.exe ] ; then
+        retval=0
+        rm -f tools/nc4_test.log
+      fi
+      if [ $retval -ne 0  ] ; then
+        echo "************************** W A R N I N G ************************************"
+        echo "NETCDF4 IO features are requested, but this installation of NetCDF           "
+        echo "  $NETCDF"
+        echo "DOES NOT support these IO features.                                          "
+        echo
+        echo "Please make sure NETCDF version is 4.1.3 or later and was built with         "
+        echo "--enable-netcdf4                                                             "
+        echo
+        echo "OR set NETCDF_classic variable                                               "
+        echo "   bash/ksh : export NETCDF_classic=1                                        "
+        echo "        csh : setenv NETCDF_classic 1                                        "
+        echo 
+        echo "Then re-run this configure script                                            "
+        echo
+        echo "!!! configure.wrf has been REMOVED !!!"
+        echo
+        echo "*****************************************************************************"
+        rm -f configure.wrf
+      else
+        echo "*****************************************************************************"
+        echo "This build of WRF will use NETCDF4 with HDF5 compression"
+        echo "*****************************************************************************"
+        echo " "
+      fi
+    fi
+
+  fi
+else
+  echo "*****************************************************************************"
+  echo "This build of WRF will use classic (non-compressed) NETCDF format"
+  echo "*****************************************************************************"
+  echo " "
+fi
+EOF_BLK
+
+  # AWK: substitui o bloco original inteiro pelo nosso, preservando o resto
+  local out
+  out="$(mktemp)"
+  awk -v repl="$blk" '
+    function printfile(f,  l){ while ((getline l < f) > 0) print l; close(f) }
+    BEGIN{ inblk=0; depth=0; started=0 }
+    # Detecta o início do bloco
+    /^# testing for netcdf4 IO features/ {
+      if (started==0) {
+        started=1; inblk=1; depth=0;
+        printfile(repl);
+        next
+      }
+    }
+    # Enquanto dentro do bloco original, controlamos a profundidade de if/fi
+    inblk {
+      # Conta if/fi apenas no início da linha (robusto o suficiente p/ esse trecho)
+      if ($0 ~ /^[[:space:]]*if[[:space:]]*\[/) depth++
+      if ($0 ~ /^[[:space:]]*fi[[:space:]]*$/) {
+        if (depth==0) { inblk=0; next } else { depth--; next }
+      }
+      next
+    }
+    { print }
+  ' "$cfg" > "$out"
+
+  mv "$out" "$cfg"
+  rm -f "$blk"
+    chmod +x "$cfg"
+  echo ">>> configure patch aplicado com sucesso (backup em ${cfg}.bak)."
+}
+
+# Exemplo de uso (ajuste o caminho se necessário):
+#   cd "$INSTALL_DIR/WRF"
+#   patch_wrfnc4_block "./configure"
+
+
+
 # ===============================================================
 # Funções auxiliares para proteger o ./compile (WRF/WPS) contra
 # conflito de IFUNC (ex: cosf) entre libimf.so (Intel oneAPI) e
@@ -1729,17 +1918,38 @@ detect_glibc_libm() {
 #   - Se não encontrada: filtra o LD_LIBRARY_PATH para excluir
 #     diretórios da Intel oneAPI, rodando csh num ambiente limpo.
 # ---------------------------------------------------------------
-wps_compile_safe() {
-  local libm; libm="$(detect_glibc_libm)"
+# wps_compile_safe() {
+#   local libm; libm="$(detect_glibc_libm)"
+#   if [ -n "$libm" ]; then
+#     echo ">>> WPS compile: LD_PRELOAD=$libm (protegendo csh do IFUNC cosf)"
+#     env LD_PRELOAD="$libm" ./compile
+#   else
+#     local CLEAN_LDLP
+#     CLEAN_LDLP="$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '/opt/intel/oneapi/compiler/' | paste -sd: -)"
+#     echo ">>> WPS compile: rodando com LD_LIBRARY_PATH saneado (sem oneAPI compiler)"
+#     env LD_LIBRARY_PATH="$CLEAN_LDLP" ./compile
+#   fi
+# }
+wrf_compile_safe() {
+  local libm logf
+  logf="build_wrf_$(date +%F_%H%M).log"
+
+  libm="$(detect_glibc_libm)"
   if [ -n "$libm" ]; then
-    echo ">>> WPS compile: LD_PRELOAD=$libm (protegendo csh do IFUNC cosf)"
-    env LD_PRELOAD="$libm" ./compile
+    echo ">>> WRF compile: LD_PRELOAD=$libm (protegendo /bin/csh do IFUNC cosf)"
+    echo ">>> Log em: $logf"
+    env LD_PRELOAD="$libm" ./compile -j "${CPU_HALF_EVEN:-1}" em_real \
+      2>&1 | tee "$logf"
   else
     local CLEAN_LDLP
     CLEAN_LDLP="$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '/opt/intel/oneapi/compiler/' | paste -sd: -)"
-    echo ">>> WPS compile: rodando com LD_LIBRARY_PATH saneado (sem oneAPI compiler)"
-    env LD_LIBRARY_PATH="$CLEAN_LDLP" ./compile
+    echo ">>> WRF compile: rodando com LD_LIBRARY_PATH saneado para /bin/csh"
+    echo ">>> Log em: $logf"
+    env LD_LIBRARY_PATH="$CLEAN_LDLP" ./compile -j "${CPU_HALF_EVEN:-1}" em_real \
+      2>&1 | tee "$logf"
   fi
+
+  echo ">>> Fim da compilação do WRF — veja $logf"
 }
 
 # ---------------------------------------------------------------
@@ -1747,18 +1957,7 @@ wps_compile_safe() {
 #   Igual ao wps_compile_safe, mas invoca a compilação do WRF.
 #   - Inclui paralelismo (-j) e o target padrão em_real.
 # ---------------------------------------------------------------
-wrf_compile_safe() {
-  local libm; libm="$(detect_glibc_libm)"
-  if [ -n "$libm" ]; then
-    echo ">>> WRF compile: LD_PRELOAD=$libm (protegendo /bin/csh do IFUNC cosf)"
-    env LD_PRELOAD="$libm" ./compile -j "$CPU_HALF_EVEN" em_real
-  else
-    local CLEAN_LDLP
-    CLEAN_LDLP="$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '/opt/intel/oneapi/compiler/' | paste -sd: -)"
-    echo ">>> WRF compile: rodando com LD_LIBRARY_PATH saneado para /bin/csh"
-    env LD_LIBRARY_PATH="$CLEAN_LDLP" ./compile -j "$CPU_HALF_EVEN" em_real
-  fi
-}
+
 
 # Check if the WRF installation option is enabled
 
@@ -1774,7 +1973,17 @@ wrf_compile_safe() {
     # Set compiler flags to include headers and link libraries from NetCDF and MPI
     export CPPFLAGS="-I$LIBS_DIR/include -I$MPI_DIR/include"
     export LDFLAGS="-L$LIBS_DIR/lib -L$MPI_DIR/lib"
-   export NETCDF_classic=1
+
+    # oneAPI e wrappers
+  if [ "${COMPILERS:-INTEL}" = "INTEL" ]; then
+    [ -f /opt/intel/oneapi/setvars.sh ] && source /opt/intel/oneapi/setvars.sh
+    export I_MPI_CC=${I_MPI_CC:-icx}
+    export I_MPI_CXX=${I_MPI_CXX:-icpx}
+    export I_MPI_FC=${I_MPI_FC:-ifx}
+  fi
+
+
+   #export NETCDF_classic=1
     # Navigate to the installation directory and clone the WRF repository
     cd $INSTALL_DIR
     rm -rf WRF  # Remove any previous WRF directory to avoid conflicts
@@ -1783,7 +1992,7 @@ wrf_compile_safe() {
 
     # Clean any previous build artifacts
     ./clean
-
+    patch_wrfnc4_block "./configure"
     # Launch interactive configuration
     # Option 34 = dmpar (distributed memory) + gfortran
     # Option 1  = basic nesting

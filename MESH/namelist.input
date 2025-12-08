@@ -1,0 +1,8 @@
+&rotate_grid
+  input_filename  = 'x1.40962.init.nc'
+  output_filename = 'x1.40962_rotated.nc'
+  rotation_angle  = 45.0
+  rotation_axis   = 1
+  center_longitude = 0.0
+  center_latitude  = 0.0
+/
